@@ -3,6 +3,7 @@ import './style.css'
 import { ASR } from './asr'
 import { Dispatcher } from './dispatcher'
 import { Executor } from './executor'
+import { SceneStore } from './scene'
 
 const containerId = 'canvas-container'
 const container = document.getElementById(containerId) as HTMLDivElement
@@ -38,13 +39,15 @@ layer.add(hint)
 centerHint()
 layer.draw()
 
+const store = new SceneStore()
+const executor = new Executor(stage, layer, store)
+
 window.addEventListener('resize', () => {
   stage.width(container.clientWidth)
   stage.height(container.clientHeight)
   centerHint()
+  executor.render()
 })
-
-const executor = new Executor(stage, layer)
 
 // ---- 语音识别 HUD ----
 const micBtn = document.getElementById('mic-btn') as HTMLButtonElement
