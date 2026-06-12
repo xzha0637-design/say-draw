@@ -5,6 +5,8 @@ const PORT = process.env.PORT || 8787
 const ARK_BASE = process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3'
 const ARK_KEY = process.env.ARK_API_KEY
 const ARK_MODEL = process.env.ARK_MODEL
+// 推理模型(如 doubao-seed 系列)设为 "disabled" 可关闭"思考",解析提速 2~3 倍;非推理模型留空
+const ARK_THINKING = process.env.ARK_THINKING
 
 // 与前端 commands.ts 对齐的取值域(后端做最终校验,不信任模型输出)
 const SHAPES = ['circle', 'rect', 'triangle', 'line']
@@ -49,6 +51,7 @@ async function callDoubao(text) {
       ],
       response_format: { type: 'json_object' },
       temperature: 0,
+      ...(ARK_THINKING ? { thinking: { type: ARK_THINKING } } : {}),
     }),
   })
   if (!resp.ok) {
