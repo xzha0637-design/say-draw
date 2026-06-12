@@ -36,4 +36,15 @@ export interface RedoCommand {
   action: 'redo'
 }
 
-export type Command = DrawCommand | ClearCommand | UndoCommand | RedoCommand
+/** 按编号删除一个图形(target = 角标编号,从 1 起)。 */
+export interface DeleteCommand {
+  action: 'delete'
+  target: number
+}
+
+export type Command =
+  | DrawCommand
+  | ClearCommand
+  | UndoCommand
+  | RedoCommand
+  | DeleteCommand

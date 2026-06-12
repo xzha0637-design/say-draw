@@ -71,6 +71,12 @@ export class Executor {
         return this.store.undo() ? '已撤销上一步' : '没有可撤销的操作'
       case 'redo':
         return this.store.redo() ? '已重做' : '没有可重做的操作'
+      case 'delete': {
+        const obj = this.store.getByNumber(cmd.target)
+        if (!obj) return `没有 ${cmd.target} 号图形`
+        this.store.remove(obj.id)
+        return `已删除 ${cmd.target} 号`
+      }
       case 'draw':
         this.store.add(cmd.shape, {
           color: cmd.color,
