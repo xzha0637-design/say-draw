@@ -4,6 +4,7 @@ import { ASR } from './asr'
 import { Dispatcher } from './dispatcher'
 import { Executor } from './executor'
 import { SceneStore } from './scene'
+import { TTS } from './tts'
 
 const containerId = 'canvas-container'
 const container = document.getElementById(containerId) as HTMLDivElement
@@ -78,6 +79,7 @@ const dispatcher = new Dispatcher(
       hint.visible(false)
       layer.draw()
     }
+    tts.speak(feedback)
     return feedback
   },
   {
@@ -102,6 +104,11 @@ const asr = new ASR({
     transcriptEl.classList.remove('empty')
     transcriptEl.textContent = msg
   },
+})
+
+// 语音反馈:朗读执行结果;播报期间静麦,避免反馈被自己听成新指令
+const tts = new TTS({
+  onSpeakingChange: (speaking) => asr.setMuted(speaking),
 })
 
 if (!ASR.supported) {
