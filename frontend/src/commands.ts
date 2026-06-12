@@ -42,9 +42,26 @@ export interface DeleteCommand {
   target: number
 }
 
+export type SizeStep = 1 | -1
+
+/** 对某个图形的属性修改(按需置位,可组合)。 */
+export interface EditPatch {
+  color?: string
+  sizeStep?: SizeStep // 相对放大/缩小一档(small ↔ medium ↔ large)
+  position?: Position // 移动到九宫格位置
+}
+
+/** 按编号修改一个图形的属性。 */
+export interface EditCommand {
+  action: 'edit'
+  target: number
+  patch: EditPatch
+}
+
 export type Command =
   | DrawCommand
   | ClearCommand
   | UndoCommand
   | RedoCommand
   | DeleteCommand
+  | EditCommand

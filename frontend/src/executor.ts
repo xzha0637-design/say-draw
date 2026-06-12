@@ -1,8 +1,9 @@
 import Konva from 'konva'
-import type { Command, DrawCommand, Position, ShapeKind, SizeName } from './commands'
-import type { Coord, SceneObject, SceneStore } from './scene'
+import type { Command, DrawCommand, EditPatch, Position, ShapeKind, SizeName } from './commands'
+import type { Coord, SceneObject, SceneStore, ShapeAttrs } from './scene'
 
 const SIZE_PX: Record<SizeName, number> = { small: 70, medium: 130, large: 210 }
+const SIZE_ORDER: SizeName[] = ['small', 'medium', 'large']
 
 // 九宫格 → 归一化中心(0..1);具体像素在渲染时按舞台尺寸换算并夹紧防溢出。
 const GRID_FRAC: Record<Position, Coord> = {
@@ -77,6 +78,14 @@ export class Executor {
         this.store.remove(obj.id)
         return `已删除 ${cmd.target} 号`
       }
+      case 'edit': {
+        const obj = this.store.getByNumber(cmd.target)
+        if (!obj) return `没有 ${cmd.target} 号图形`
+        const { patch, desc } = this.resolveEdit(obj, cmd.patch)
+        if (!patch) return `不知道要怎么改 ${cmd.target} 号`
+        this.store.update(obj.id, patch)
+        return `已把 ${cmd.target} 号${desc}`
+      }
       case 'draw':
         this.store.add(cmd.shape, {
           color: cmd.color,
@@ -90,6 +99,30 @@ export class Executor {
         return exhaustive
       }
     }
+  }
+
+  /** 把高层 EditPatch 解析成对 ShapeAttrs 的具体修改 + 反馈文案。 */
+  private resolveEdit(
+    obj: SceneObject,
+    patch: EditPatch,
+  ): { patch: Partial<ShapeAttrs> | null; desc: string } {
+    const out: Partial<ShapeAttrs> = {}
+    const parts: string[] = []
+    if (patch.color) {
+      out.color = patch.color
+      parts.push('改了颜色')
+    }
+    if (patch.sizeStep) {
+      const i = SIZE_ORDER.indexOf(obj.attrs.size)
+      const ni = Math.min(Math.max(i + patch.sizeStep, 0), SIZE_ORDER.length - 1)
+      out.size = SIZE_ORDER[ni]
+      parts.push(patch.sizeStep > 0 ? '放大' : '缩小')
+    }
+    if (patch.position) {
+      out.center = GRID_FRAC[patch.position]
+      parts.push(`移到${POS_CN[patch.position]}`)
+    }
+    return { patch: Object.keys(out).length > 0 ? out : null, desc: parts.join('、') }
   }
 
   /** 全量重绘:清空场景组后按 store 顺序重建每个对象。 */

@@ -62,6 +62,16 @@ export class SceneStore {
     return true
   }
 
+  /** 按 id 修改属性(浅合并到 attrs),并通知渲染。 */
+  update(id: string, patch: Partial<ShapeAttrs>): SceneObject | null {
+    const obj = this.objects.find((o) => o.id === id)
+    if (!obj) return null
+    this.snapshot()
+    Object.assign(obj.attrs, patch)
+    this.emit()
+    return obj
+  }
+
   /** 清空全部图元。 */
   clear(): void {
     if (this.objects.length === 0) return
