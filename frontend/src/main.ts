@@ -1,7 +1,7 @@
 import Konva from 'konva'
 import './style.css'
 import { ASR } from './asr'
-import { parse } from './parser'
+import { Dispatcher } from './dispatcher'
 import { Executor } from './executor'
 
 const containerId = 'canvas-container'
@@ -67,20 +67,26 @@ function showTranscript(text: string, interim: boolean): void {
     : escapeHtml(text)
 }
 
-// 最终识别结果 → 规则解析 → 执行引擎
-function handleCommand(text: string): void {
-  const result = parse(text)
-  if (result.ok) {
-    const feedback = executor.execute(result.command)
+// 双路调度:规则快路 → 豆包慢路兜底
+const dispatcher = new Dispatcher(
+  (cmd) => {
+    const feedback = executor.execute(cmd)
     if (hint.visible()) {
       hint.visible(false)
       layer.draw()
     }
-    showTranscript(`「${text}」→ ${feedback}`, false)
-  } else {
-    showTranscript(`「${text}」—— ${result.reason}`, false)
-  }
-}
+    return feedback
+  },
+  {
+    showResult: (text) => showTranscript(text, false),
+    setPending: (on) => {
+      if (on) {
+        transcriptEl.classList.remove('empty')
+        transcriptEl.textContent = '🤔 豆包理解中…'
+      }
+    },
+  },
+)
 
 const asr = new ASR({
   onListeningChange: (listening) => {
@@ -88,7 +94,7 @@ const asr = new ASR({
     micBtn.textContent = listening ? '⏹ 停止聆听' : '🎤 开始聆听'
   },
   onInterim: (text) => showTranscript(text, true),
-  onFinal: (text) => handleCommand(text),
+  onFinal: (text) => void dispatcher.handle(text),
   onError: (msg) => {
     transcriptEl.classList.remove('empty')
     transcriptEl.textContent = msg

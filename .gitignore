@@ -21,3 +21,6 @@ npm-debug.log*
 
 # internal working file (AI 指令 / 评分笔记,不纳入提交)
 CLAUDE.md
+
+# 验证产物 / 人工审核用图(草图 vs 效果图),不纳入提交
+picture/
