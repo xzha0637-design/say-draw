@@ -1,8 +1,12 @@
-// 对话式造图的前端控制器:维护多轮会话(带记忆),调用后端 /api/chat,
-// 助手既可继续追问(chat),也可在信息足够时触发文生图(generate)。
+// 对话式造图 + 语音迭代改图的前端控制器。
+// 流程:语音 → /api/chat(带记忆 + 是否已有图)→ 助手判断 chat/generate/edit:
+//   chat   = 继续聊(反问/澄清);
+//   generate = 全新生成;
+//   edit   = 以"当前图"为参考改图(改色/换背景/增减元素…,保持其余一致)。
+// 维护一个图片栈:栈顶=当前图,支持「撤销」回上一张。
 //
-// 记忆:① 会话内——history[] 累积每一轮,整段随每次请求发给豆包,模型记得聊过什么;
-//      ② 跨刷新——history 持久化到 localStorage,刷新/重开页面后自动恢复并重放气泡。
+// 记忆:① 会话内——history[] 随每次请求发给豆包;② 跨刷新——history 持久化 localStorage。
+// (图片 URL 是签名会过期,不持久化;刷新后文字对话恢复,图片为本会话内有效。)
 
 export type ChatRole = 'user' | 'assistant'
 export interface ChatMsg {
@@ -12,48 +16,50 @@ export interface ChatMsg {
 
 type ChatResp =
   | { ok: true; action: 'chat'; reply: string }
-  | { ok: true; action: 'generate'; reply: string; prompt: string }
+  | { ok: true; action: 'generate' | 'edit'; reply: string; prompt: string }
   | { ok: false; reason: string }
 
 export type GenResult = { ok: true; url: string } | { ok: false; reason: string }
 
 export interface ChatUI {
-  /** 往对话区追加一条气泡,返回该气泡元素(便于后续更新文案,如"生成中→已生成")。 */
+  /** 追加一条文字气泡,返回元素(便于后续更新)。 */
   addMessage: (role: ChatRole, text: string) => HTMLElement
-  /** 清空对话区所有气泡。 */
+  /** 在对话流中追加一张图片(点击可放大)。 */
+  addImage: (url: string) => void
+  /** 清空对话区。 */
   clear: () => void
-  /** 思考/生成进行中提示。 */
+  /** 思考 / 生成 / 改图 进行中提示。 */
   setPending: (on: boolean, label?: string) => void
-  /** 朗读一句话(助手回复 / 状态)。 */
+  /** 朗读一句话。 */
   speak: (text: string) => void
-  /** 展示最终生成的图片(覆盖层)。 */
-  showImage: (url: string, caption: string) => void
-  /** 收起图片,回到对话。 */
-  hideImage: () => void
 }
 
 const STORAGE_KEY = 'saydraw-chat-history'
-const MAX_STORED = 60 // 持久化保留的最近条数(防无限增长)
-const MAX_SENT = 20 // 每次发给模型的最近条数(控制延迟/成本;前端仍留全量用于展示)
+const MAX_STORED = 60
+const MAX_SENT = 20
 const RESET_RE = /^(清空对话|清空记忆|重新开始|重新来过|重置对话|换个新对话|新对话)$/
+const UNDO_RE = /^(撤销|上一张|退回|回到上一张|返回上一张|还原)$/
 
 /**
- * 会话控制器:语音文本进 → 多轮对话出。
- * 助手判断该继续聊还是该生成(缺风格/背景/用途会主动反问);
- * 会话带记忆并持久化,刷新后仍记得聊过的内容。
+ * 会话控制器:语音文本进 → 聊 / 生成 / 改图 出。
+ * 助手判断该继续聊、生成新图、还是改当前图(缺信息会反问);带对话记忆与图片栈。
  */
 export class Conversation {
   private history: ChatMsg[] = []
-  private imageShown = false
+  private imageStack: string[] = [] // 生成 / 改过的图 URL,栈顶 = 当前图
 
   constructor(
     private readonly ui: ChatUI,
-    private readonly generate: (prompt: string) => Promise<GenResult>,
+    private readonly generate: (prompt: string, image?: string) => Promise<GenResult>,
   ) {
     this.history = this.load()
   }
 
-  /** 重放已恢复的历史气泡(页面加载后由 main 调用一次);无历史返回 false。 */
+  private get currentImage(): string | null {
+    return this.imageStack.length ? this.imageStack[this.imageStack.length - 1] : null
+  }
+
+  /** 重放已恢复的历史气泡(图片不持久化,故只重放文字);无历史返回 false。 */
   replay(): boolean {
     if (this.history.length === 0) return false
     for (const m of this.history) this.ui.addMessage(m.role, m.content)
@@ -75,11 +81,19 @@ export class Conversation {
       return
     }
 
-    // 看图状态下:任意话先收起回到对话;「返回 / 关闭」则仅收起、不当新消息
-    if (this.imageShown) {
-      this.imageShown = false
-      this.ui.hideImage()
-      if (/^(返回|关闭|回去|退出)$/.test(t)) return
+    // 图片撤销:回到上一张(需已有图)
+    if (this.currentImage && UNDO_RE.test(t)) {
+      if (this.imageStack.length >= 2) {
+        this.imageStack.pop()
+        this.ui.addMessage('assistant', '↩️ 已退回上一张')
+        this.ui.addImage(this.currentImage as string)
+        this.ui.speak('已退回上一张')
+      } else {
+        const msg = '没有更早的版本了'
+        this.ui.addMessage('assistant', msg)
+        this.ui.speak(msg)
+      }
+      return
     }
 
     this.ui.addMessage('user', t)
@@ -109,40 +123,39 @@ export class Conversation {
     this.persist()
     this.ui.speak(resp.reply)
 
-    if (resp.action === 'generate') await this.runGenerate(resp.prompt)
+    if (resp.action === 'generate') await this.runGenerate(resp.prompt, false)
+    else if (resp.action === 'edit') await this.runGenerate(resp.prompt, true)
   }
 
-  /** 触发文生图,并在同一条气泡里更新状态。 */
-  private async runGenerate(prompt: string): Promise<void> {
-    const tip = this.ui.addMessage('assistant', `🎨 正在生成…\n${prompt}`)
-    this.ui.setPending(true, '🎨 正在生成图片…(约十几秒)')
+  /** 生成(全新)或编辑(以当前图为参考)。 */
+  private async runGenerate(prompt: string, isEdit: boolean): Promise<void> {
+    const editing = isEdit && !!this.currentImage // edit 但还没图 → 退化为全新生成
+    this.ui.setPending(true, editing ? '🎨 改图中…(约十几秒)' : '🎨 生成中…(约十几秒)')
     try {
-      const r = await this.generate(prompt)
+      const r = await this.generate(prompt, editing ? (this.currentImage as string) : undefined)
       this.ui.setPending(false)
       if (r.ok) {
-        this.ui.showImage(r.url, prompt)
-        this.imageShown = true
-        tip.textContent = '🎨 已生成 ✓(说「返回」继续聊,或直接说怎么改)'
+        this.imageStack.push(r.url)
+        this.ui.addImage(r.url)
       } else {
-        tip.textContent = `生成失败:${r.reason}`
+        this.ui.addMessage('assistant', `生成失败:${r.reason}`)
         this.ui.speak('生成失败了')
       }
     } catch {
       this.ui.setPending(false)
-      tip.textContent = '生成失败,后端是否已启动并配好生图模型?'
+      this.ui.addMessage('assistant', '生成失败,后端是否已启动并配好生图模型?')
     }
   }
 
-  /** 清空记忆:历史、本地存储、对话区全清。 */
+  /** 清空记忆:历史、本地存储、图片栈、对话区全清。 */
   private reset(): void {
     this.history = []
-    this.imageShown = false
+    this.imageStack = []
     try {
       localStorage.removeItem(STORAGE_KEY)
     } catch {
       /* localStorage 不可用时忽略 */
     }
-    this.ui.hideImage()
     this.ui.clear()
   }
 
@@ -150,7 +163,7 @@ export class Conversation {
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: this.history.slice(-MAX_SENT) }),
+      body: JSON.stringify({ messages: this.history.slice(-MAX_SENT), hasImage: !!this.currentImage }),
     })
     return (await resp.json()) as ChatResp
   }

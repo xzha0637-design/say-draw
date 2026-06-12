@@ -45,26 +45,41 @@ function idleStatus(): void {
   )
 }
 
-// ---- 最终图片覆盖层 ----
-function showResultImage(url: string, caption: string): void {
+// ---- 放大查看覆盖层 ----
+function openOverlay(url: string): void {
   resultImg.src = url
-  resultCaption.textContent = `🎨 ${caption}　|　说「返回」或点击任意处继续`
+  resultCaption.textContent = '点击任意处关闭'
   resultOverlay.classList.remove('hidden')
 }
-function hideResultImage(): void {
+function closeOverlay(): void {
   resultOverlay.classList.add('hidden')
   resultImg.removeAttribute('src')
 }
-resultOverlay.addEventListener('click', hideResultImage)
+resultOverlay.addEventListener('click', closeOverlay)
 
-// ---- 文生图(prompt 由对话产出,已含风格)----
+// ---- 对话流内联图片(点击放大)----
+function addImage(url: string): void {
+  const wrap = document.createElement('div')
+  wrap.className = 'msg assistant'
+  const img = document.createElement('img')
+  img.className = 'gen-img'
+  img.src = url
+  img.alt = '生成的图片'
+  img.addEventListener('click', () => openOverlay(url))
+  wrap.appendChild(img)
+  chatEl.appendChild(wrap)
+  chatEl.scrollTop = chatEl.scrollHeight
+}
+
+// ---- 文生图 / 改图(带 image 即编辑当前图)----
 async function generate(
   prompt: string,
+  image?: string,
 ): Promise<{ ok: true; url: string } | { ok: false; reason: string }> {
   const resp = await fetch('/api/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify(image ? { prompt, image } : { prompt }),
   })
   return (await resp.json()) as { ok: true; url: string } | { ok: false; reason: string }
 }
@@ -82,8 +97,7 @@ const conversation = new Conversation(
       else idleStatus()
     },
     speak: (t) => tts.speak(t),
-    showImage: showResultImage,
-    hideImage: hideResultImage,
+    addImage,
   },
   generate,
 )

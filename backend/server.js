@@ -11,29 +11,35 @@ const ARK_THINKING = process.env.ARK_THINKING
 const ARK_IMAGE_MODEL = process.env.ARK_IMAGE_MODEL
 
 // 对话式造图的系统提示:多轮聊清画面 → 满意后触发生成
-const CHAT_SYSTEM_PROMPT = `你是「语音造图」的 AI 助手。用户只能用语音和你交流,你们一起把"想要的画面"聊清楚,满意后由你触发生成最终图片。
+const CHAT_SYSTEM_PROMPT = `你是「语音造图」的 AI 助手。用户只能用语音和你交流,你们先把"想要的画面"聊清楚并生成,之后还能用语音不断修改这张图,直到满意。
 
-每轮只输出一个 JSON 对象,二选一:
+每轮只输出一个 JSON 对象,三选一:
 - 继续聊: {"action":"chat","reply":"…"}
-- 去生成: {"action":"generate","reply":"…","prompt":"…"}
+- 生成新图: {"action":"generate","reply":"…","prompt":"…"}
+- 修改当前图: {"action":"edit","reply":"…","prompt":"…"}
 
-怎么聊:
+还没有图时:
 - 帮用户把画面说清楚,逐步确认四件事:① 画什么(主体/内容)② 风格(写实照片/卡通/油画/水彩/像素/线描…)③ 背景或场景 ④ 用途(头像/海报/壁纸/插画/表情…)。
 - 若关键信息缺失(尤其风格、背景、用途),用 chat 友好、口语地一次问清缺的一两项,别一口气问太多。
-- 用户补充或修改时,在心里更新完整画面;可简短复述你的理解让用户确认。
-- 已经够清楚、且用户表示满意或让你开始("可以了""就这样""生成吧""开始画""好了"等)→ 输出 generate。
-- 用户看到图后继续提要求(改颜色/换背景/换风格…)→ 视为对画面的修改,信息够就再 generate,否则先 chat 问清。
+- 够清楚且用户让你开始("可以了""生成吧""开始画"等)→ 输出 generate。
 
-generate 时:
-- reply: 一句简短口语确认(例:"好嘞,这就给你生成~")。
-- prompt: 给文生图模型的【完整中文描述】,综合多轮对话:主体 + 风格 + 背景 + 关键细节 + 色调/氛围,尽量具体、可成画;不要包含对话语气词。
+已经有一张图时(系统会提示"当前已有图"):
+- 用户要改它(改颜色/换背景/增减元素/调整大小或位置/换风格等)→ 用 edit。系统会自动把当前图作为参考传给生图模型,你不用管图怎么传。
+- edit 的 prompt 要写清"改动后的画面",用"保留X不变,把Y改成Z"或"在…增加…,其余保持不变"这种描述,确保只动该动的、其余维持一致。
+- 只有用户明确想要"一张全新、与当前无关的图"时才用 generate。
+- 用户只是夸赞/闲聊/问问题(不是要改图)→ 仍用 chat。信息太模糊不足以改 → 先 chat 问清。
 
-注意:
-- reply 会被朗读出来,要短、自然、像真人。
-- 严格只输出一个 JSON,不要解释、不要 markdown、不要多余文字。`
+prompt 通用要求:综合多轮对话给出【完整中文描述】,主体+风格+背景+关键细节+色调,尽量具体可成画,不要对话语气词。
+reply:会被朗读,要短、自然、像真人(生成例:"好嘞这就给你生成~";改图例:"没问题,把猫改成橙色~")。
 
-/** 对话式造图:把多轮消息发给豆包,强制 JSON 输出 {action, reply, prompt?}。 */
-async function callDoubaoChat(messages) {
+严格只输出一个 JSON,不要解释、不要 markdown、不要多余文字。`
+
+/** 对话式造图:把多轮消息发给豆包,强制 JSON 输出 {action, reply, prompt?}。
+ *  hasImage=true 时提示模型"当前已有图",引导它对修改请求用 action="edit"。 */
+async function callDoubaoChat(messages, hasImage) {
+  const system = hasImage
+    ? `${CHAT_SYSTEM_PROMPT}\n\n【当前状态:画面上已经有一张生成好的图。用户接下来若要修改它,请用 action="edit"(系统会自动把当前图作为参考);只有明确要全新无关的图才用 generate。】`
+    : CHAT_SYSTEM_PROMPT
   const resp = await fetch(`${ARK_BASE}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -42,7 +48,7 @@ async function callDoubaoChat(messages) {
     },
     body: JSON.stringify({
       model: ARK_MODEL,
-      messages: [{ role: 'system', content: CHAT_SYSTEM_PROMPT }, ...messages],
+      messages: [{ role: 'system', content: system }, ...messages],
       response_format: { type: 'json_object' },
       temperature: 0.6, // 对话比解析更需要自然,略升温
       max_tokens: 1200,
@@ -58,21 +64,27 @@ async function callDoubaoChat(messages) {
   return JSON.parse(content)
 }
 
-/** 调用火山方舟 Seedream 文生图,返回图片 URL。 */
-async function callSeedream(prompt) {
+/**
+ * 调用火山方舟 Seedream 文生图,返回图片 URL。
+ * 传 image(当前图 URL)即进入「编辑模式」:以该图为参考,只改 prompt 所述、保留其余
+ * ——Seedream 生成/编辑同一接口,差别只在多一个 image 参数。
+ */
+async function callSeedream(prompt, image) {
+  const body = {
+    model: ARK_IMAGE_MODEL,
+    prompt,
+    size: '2048x2048', // 需 ≥ 3,686,400 像素
+    response_format: 'url',
+    watermark: false,
+  }
+  if (image) body.image = image
   const resp = await fetch(`${ARK_BASE}/images/generations`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${ARK_KEY}`,
     },
-    body: JSON.stringify({
-      model: ARK_IMAGE_MODEL,
-      prompt,
-      size: '2048x2048', // 需 ≥ 3,686,400 像素
-      response_format: 'url',
-      watermark: false,
-    }),
+    body: JSON.stringify(body),
   })
   const data = await resp.json()
   if (!resp.ok) {
@@ -107,12 +119,13 @@ app.post('/api/chat', async (req, res) => {
   if (!ARK_KEY || !ARK_MODEL) {
     return res.status(500).json({ ok: false, reason: '后端未配置 ARK_API_KEY / ARK_MODEL(见 backend/.env.example)' })
   }
+  const hasImage = req.body?.hasImage === true
   try {
-    const out = await callDoubaoChat(messages)
+    const out = await callDoubaoChat(messages, hasImage)
     const reply = typeof out?.reply === 'string' && out.reply.trim() ? out.reply.trim() : '嗯,你再多说说想要的画面?'
-    if (out?.action === 'generate') {
+    if (out?.action === 'generate' || out?.action === 'edit') {
       const prompt = typeof out?.prompt === 'string' ? out.prompt.trim() : ''
-      if (prompt) return res.json({ ok: true, action: 'generate', reply, prompt })
+      if (prompt) return res.json({ ok: true, action: out.action, reply, prompt })
     }
     res.json({ ok: true, action: 'chat', reply })
   } catch (e) {
@@ -121,9 +134,10 @@ app.post('/api/chat', async (req, res) => {
   }
 })
 
-// 画面描述 → 最终图片(Seedream 文生图);prompt 由对话产出,已含风格,直接用
+// 画面描述 → 图片(Seedream);prompt 由对话产出。带 image 则为「编辑当前图」,否则全新生成
 app.post('/api/generate', async (req, res) => {
   const prompt = (req.body?.prompt ?? '').toString().trim()
+  const image = typeof req.body?.image === 'string' && req.body.image.trim() ? req.body.image.trim() : null
   if (!prompt) {
     return res.status(400).json({ ok: false, reason: '缺少 prompt' })
   }
@@ -131,7 +145,7 @@ app.post('/api/generate', async (req, res) => {
     return res.status(500).json({ ok: false, reason: '后端未配置 ARK_API_KEY / ARK_IMAGE_MODEL(见 backend/.env.example)' })
   }
   try {
-    const url = await callSeedream(prompt)
+    const url = await callSeedream(prompt, image)
     res.json({ ok: true, url })
   } catch (e) {
     console.error('[generate] Seedream 调用失败:', e?.message || e)

@@ -93,6 +93,15 @@ body {
   border-bottom-left-radius: 5px;
 }
 
+/* 对话流里的生成图(点击放大) */
+.gen-img {
+  max-width: min(72%, 420px);
+  border-radius: 14px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
+  cursor: zoom-in;
+  display: block;
+}
+
 /* 语音 HUD(底部) */
 #hud {
   flex: 0 0 auto;
