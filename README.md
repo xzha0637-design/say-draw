@@ -38,7 +38,18 @@
 
 ## 运行方式
 
-> 随开发补全。
+> 环境:Node.js 18+;浏览器用 **Chrome / Edge**(语音识别依赖 Web Speech API)。
+
+### 前端
+
+```bash
+cd frontend
+npm install
+npm run dev        # 开发服务器,默认 http://localhost:5173 并自动打开
+```
+
+打开页面后,点击「🎤 开始聆听」并允许麦克风权限,即可开始语音交互。
+生产构建:`npm run build`(产物在 `frontend/dist/`)。
 
 ## Demo 视频
 
