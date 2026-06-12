@@ -1,0 +1,15 @@
+{
+  "name": "say-draw-backend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "say-draw 后端薄代理:转发火山方舟(豆包大模型),把语音指令解析为结构化绘图指令",
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}
