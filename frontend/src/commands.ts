@@ -28,4 +28,12 @@ export interface ClearCommand {
   action: 'clear'
 }
 
-export type Command = DrawCommand | ClearCommand
+export interface UndoCommand {
+  action: 'undo'
+}
+
+export interface RedoCommand {
+  action: 'redo'
+}
+
+export type Command = DrawCommand | ClearCommand | UndoCommand | RedoCommand

@@ -63,17 +63,27 @@ export class Executor {
 
   /** 执行一条指令,返回给用户的反馈文案;实际绘制由 store 变更驱动 render。 */
   execute(cmd: Command): string {
-    if (cmd.action === 'clear') {
-      this.store.clear()
-      return '已清空画布'
+    switch (cmd.action) {
+      case 'clear':
+        this.store.clear()
+        return '已清空画布'
+      case 'undo':
+        return this.store.undo() ? '已撤销上一步' : '没有可撤销的操作'
+      case 'redo':
+        return this.store.redo() ? '已重做' : '没有可重做的操作'
+      case 'draw':
+        this.store.add(cmd.shape, {
+          color: cmd.color,
+          size: cmd.size,
+          center: GRID_FRAC[cmd.position],
+          scale: 1,
+        })
+        return `已画 ${describe(cmd)}`
+      default: {
+        const exhaustive: never = cmd
+        return exhaustive
+      }
     }
-    this.store.add(cmd.shape, {
-      color: cmd.color,
-      size: cmd.size,
-      center: GRID_FRAC[cmd.position],
-      scale: 1,
-    })
-    return `已画 ${describe(cmd)}`
   }
 
   /** 全量重绘:清空场景组后按 store 顺序重建每个对象。 */

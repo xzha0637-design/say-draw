@@ -38,6 +38,8 @@ const POSITIONS: Array<{ kw: string[]; pos: Position }> = [
 ]
 
 const CLEAR_KW = ['清空', '清除', '清屏', '清掉', '全部删除', '删掉全部']
+const UNDO_KW = ['撤销', '撤回', '退回', '回退', '上一步']
+const REDO_KW = ['重做', '恢复']
 const DEFAULT_COLOR = '#3498db'
 
 function matchShape(t: string): ShapeKind | null {
@@ -67,6 +69,12 @@ export function parse(raw: string): ParseResult {
 
   if (CLEAR_KW.some((k) => t.includes(k))) {
     return { ok: true, command: { action: 'clear' } }
+  }
+  if (UNDO_KW.some((k) => t.includes(k))) {
+    return { ok: true, command: { action: 'undo' } }
+  }
+  if (REDO_KW.some((k) => t.includes(k))) {
+    return { ok: true, command: { action: 'redo' } }
   }
 
   const shape = matchShape(t)

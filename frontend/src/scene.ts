@@ -27,15 +27,19 @@ type ChangeCb = (store: SceneStore) => void
 /**
  * 场景对象模型:绘图不再「画完即忘」,而是进入一个可被编号、增删、重排的集合。
  * 这是后续「按编号编辑 / 删除 / 撤销 / 指代」等能力的地基。
- * 本 PR 只做集合与编号;变更通过 onChange 通知渲染器(Executor)。
+ * 变更通过 onChange 通知渲染器(Executor)。
+ * 历史:每次增删改前对场景做快照,支持「撤销 / 重做」(粒度 = 一条用户指令)。
  */
 export class SceneStore {
   private objects: SceneObject[] = []
   private seq = 0
   private listeners: ChangeCb[] = []
+  private past: SceneObject[][] = []
+  private future: SceneObject[][] = []
 
   /** 新增一个图元,自动分配 id 与下一个编号,并通知渲染。 */
   add(kind: ShapeKind, attrs: ShapeAttrs): SceneObject {
+    this.snapshot()
     const obj: SceneObject = {
       id: `o${++this.seq}`,
       number: this.objects.length + 1,
@@ -51,6 +55,7 @@ export class SceneStore {
   remove(id: string): boolean {
     const i = this.objects.findIndex((o) => o.id === id)
     if (i < 0) return false
+    this.snapshot()
     this.objects.splice(i, 1)
     this.renumber()
     this.emit()
@@ -60,8 +65,29 @@ export class SceneStore {
   /** 清空全部图元。 */
   clear(): void {
     if (this.objects.length === 0) return
+    this.snapshot()
     this.objects = []
     this.emit()
+  }
+
+  /** 撤销上一步(回到最近一次快照前的状态)。 */
+  undo(): boolean {
+    const prev = this.past.pop()
+    if (!prev) return false
+    this.future.push(this.copy())
+    this.objects = prev
+    this.emit()
+    return true
+  }
+
+  /** 重做被撤销的一步。 */
+  redo(): boolean {
+    const next = this.future.pop()
+    if (!next) return false
+    this.past.push(this.copy())
+    this.objects = next
+    this.emit()
+    return true
   }
 
   /** 只读快照,供渲染器遍历。 */
@@ -83,6 +109,20 @@ export class SceneStore {
     this.objects.forEach((o, i) => {
       o.number = i + 1
     })
+  }
+
+  /** 把当前场景压入历史栈,并清空重做栈(新操作打断了重做链)。 */
+  private snapshot(): void {
+    this.past.push(this.copy())
+    this.future = []
+  }
+
+  /** 深拷贝当前对象数组(含嵌套 attrs/center),供历史快照使用。 */
+  private copy(): SceneObject[] {
+    return this.objects.map((o) => ({
+      ...o,
+      attrs: { ...o.attrs, center: { ...o.attrs.center } },
+    }))
   }
 
   private emit(): void {
