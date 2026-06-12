@@ -3,15 +3,29 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>say-draw —— AI 语音绘图工具</title>
+    <title>语音造图 —— 和 AI 聊出你要的画</title>
   </head>
   <body>
-    <div id="canvas-container"></div>
+    <div id="app">
+      <header id="topbar">
+        <span>🎙️ 语音造图 · 和 AI 聊清楚 → 一键生成</span>
+        <button id="reset-btn" type="button" title="清空对话,从头开始">🆕 新对话</button>
+      </header>
 
-    <!-- 语音 HUD:麦克风按钮 + 识别字幕 -->
-    <div id="hud">
-      <button id="mic-btn" type="button">🎤 开始聆听</button>
-      <div id="transcript" class="empty">点击按钮并允许麦克风权限后,开始说话…</div>
+      <!-- 多轮对话区 -->
+      <div id="chat"></div>
+
+      <!-- 语音 HUD:麦克风按钮 + 识别字幕 / 状态 -->
+      <div id="hud">
+        <div id="status" class="empty">点击下方按钮并允许麦克风,说说你想画什么…</div>
+        <button id="mic-btn" type="button">🎤 开始聆听</button>
+      </div>
+    </div>
+
+    <!-- 最终生成图片覆盖层 -->
+    <div id="result-overlay" class="hidden">
+      <img id="result-img" alt="生成的图片" />
+      <div id="result-caption"></div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>
