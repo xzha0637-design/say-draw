@@ -18,8 +18,57 @@
 
 - 前端:Vite + TypeScript + Konva
 - 语音输入:Web Speech API(zh-CN);语音反馈:SpeechSynthesis
-- 指令理解:Claude(Haiku 4.5 快路解析 / Opus 4.8 场景生成与多模态评审),结构化输出强制 JSON
+- 指令理解:规则解析(快路) + Claude(Haiku 4.5 解析 / Opus 4.8 场景生成与多模态评审,结构化输出强制 JSON)
 - 后端:薄代理(转发 Claude API,密钥不进浏览器)
+
+## 运行方式(从零复现)
+
+> 适用于**全新设备,从零开始**。当前可体验:**语音绘制基础图元**(圆 / 方块 / 三角 / 线 + 颜色 / 大小 / 九宫格位置)。
+
+### 1. 环境要求
+
+- **Node.js ≥ 18**(含 npm):https://nodejs.org ,或 macOS `brew install node`
+- **Git**
+- **浏览器:Chrome 或 Edge**(语音识别依赖 Web Speech API;Safari / Firefox 不保证)
+- 一个可用的**麦克风**
+
+### 2. 获取代码
+
+```bash
+git clone https://github.com/xzha0637-design/say-draw.git
+cd say-draw
+```
+
+### 3. 启动前端
+
+```bash
+cd frontend
+npm install        # 安装依赖(首次必跑)
+npm run dev        # 开发服务器,默认 http://localhost:5173 并自动打开
+```
+
+> 若自动打开的不是 Chrome/Edge,请手动用 **Chrome / Edge** 打开 http://localhost:5173 。
+
+### 4. 使用 / 测试
+
+1. 点击页面底部「🎤 开始聆听」,在浏览器弹窗中**允许麦克风权限**。
+2. 说出绘图指令,例如:
+   - "画一个红色的圆"
+   - "在左上角画一个蓝色的方块"
+   - "画一个大的绿色三角形"
+   - "清空"(清空画布)
+3. 对应图形出现在画布上,底部字幕显示识别结果与执行反馈。
+4. 点「⏹ 停止聆听」结束;关闭服务器在终端按 `Ctrl+C`。
+
+> 当前为**规则解析(快路)**,覆盖圆 / 方块 / 三角 / 线 + 颜色 + 大小 + 九宫格位置;更复杂 / 口语化的指令将在后续接入 Claude。
+
+### 生产构建
+
+```bash
+cd frontend
+npm run build      # 产物输出到 frontend/dist/
+npm run preview    # 本地预览构建产物
+```
 
 ## 依赖说明
 
@@ -35,10 +84,6 @@
 /backend    后端薄代理(转发 Claude)
 /docs       设计文档
 ```
-
-## 运行方式
-
-> 随开发补全。
 
 ## Demo 视频
 
