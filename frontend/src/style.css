@@ -17,3 +17,83 @@ body {
   height: 100vh;
   background: #fafafa;
 }
+
+/* 语音 HUD */
+#hud {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  width: min(92vw, 680px);
+  pointer-events: none; /* 子元素各自开启,避免遮挡画布 */
+}
+
+#mic-btn {
+  pointer-events: auto;
+  border: none;
+  border-radius: 999px;
+  padding: 14px 28px;
+  font-size: 17px;
+  font-weight: 600;
+  color: #fff;
+  background: #2b7a4b;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  transition: background 0.15s, transform 0.05s;
+}
+
+#mic-btn:hover {
+  background: #246b41;
+}
+
+#mic-btn:active {
+  transform: scale(0.97);
+}
+
+#mic-btn:disabled {
+  background: #999;
+  cursor: not-allowed;
+}
+
+#mic-btn.listening {
+  background: #c0392b;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    box-shadow: 0 4px 16px rgba(192, 57, 43, 0.3);
+  }
+  50% {
+    box-shadow: 0 4px 28px rgba(192, 57, 43, 0.65);
+  }
+}
+
+#transcript {
+  pointer-events: none;
+  min-height: 28px;
+  max-width: 100%;
+  padding: 10px 16px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: 16px;
+  line-height: 1.5;
+  text-align: center;
+  word-break: break-word;
+}
+
+#transcript.empty {
+  background: rgba(0, 0, 0, 0.45);
+  color: #ddd;
+  font-size: 14px;
+}
+
+#transcript .interim {
+  color: #9fd3b0;
+}
