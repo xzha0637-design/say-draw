@@ -20,22 +20,48 @@ const POSITIONS = [
 ]
 const DEFAULT_COLOR = '#3498db'
 
-const SYSTEM_PROMPT = `你是语音绘图工具的指令解析器。把用户的中文绘图指令解析成一个 JSON 对象,只输出 JSON,不要解释。
+const SYSTEM_PROMPT = `你是语音绘图工具的指令解析器。把用户的一句中文语音指令解析成一个 JSON 对象,只输出 JSON,不要解释、不要 markdown 代码块。
 
-字段与取值:
-- action: "draw"(绘制) | "clear"(清空画布) | "unknown"(无法理解或不支持)
-- 当 action="draw" 时还需:
-  - shape: "circle"(圆) | "rect"(方块/矩形/正方形) | "triangle"(三角形) | "line"(线)
-  - color: CSS 颜色字符串(十六进制如 "#87CEEB",或英文名如 "skyblue");无法判断填 ""
-  - size: "small"(小/迷你) | "medium"(中/默认) | "large"(大/巨大)
-  - position: "top-left" "top" "top-right" "left" "center" "right" "bottom-left" "bottom" "bottom-right"(九宫格;无法判断填 "center")
-- 当 action="unknown" 时:加 "reason" 字段简短说明(如 "不支持的图形:五角星")。
+可用动作 action:
+- "draw":画一个新图形。附加 shape / color / size / position。
+- "clear":清空画布。
+- "undo":撤销上一步;"redo":重做。
+- "delete":删除一个已有图形。附加 target。
+- "edit":修改一个已有图形。附加 target 和 patch。
+- "generate":把场景渲染成写实大图(用户说"渲染成…""生成一张…""画一张…的照片"等)。附加 prompt。
+- "unknown":无法理解或不支持。附加 reason。
 
-规则:
-- 形状只能是上述四种;用户要的形状不在其中时,用 action="unknown" 并说明。
-- 颜色尽量给准确的十六进制或英文名(如 "天蓝色"→"#87CEEB","土黄色"→"#cca300")。
-- 模糊量词("大一点""小小的""特别大")映射到 small/medium/large。
-- 严格只输出一个 JSON 对象,不要 markdown 代码块。`
+字段取值:
+- shape: "circle"(圆) | "rect"(方块/矩形/正方形) | "triangle"(三角) | "line"(线)。只支持这四种,其他形状(房子/猫…)用 unknown。
+- color: CSS 颜色,十六进制如 "#87CEEB" 或英文名如 "red";判断不了填 ""。("天蓝"→"#87CEEB")
+- size: "small"(小/迷你) | "medium"(中/默认) | "large"(大/巨大)。
+- position: "top-left" "top" "top-right" "left" "center" "right" "bottom-left" "bottom" "bottom-right"(九宫格,判断不了填 "center")。
+- target(delete/edit 用,指明操作哪个图形):
+  - 按编号: {"by":"number","n":2}(用户说"2号""第二个")
+  - 指代最近操作的: {"by":"focus"}(用户说"它""这个""刚才那个""上一个")
+- patch(edit 用,只填用户提到的项):
+  - "color": CSS 颜色(改颜色)
+  - "sizeStep": 1(变大/放大)或 -1(变小/缩小)
+  - "position": 九宫格之一(移动到某处)
+- prompt(generate 用): 用户想要的画面描述文字,尽量保留原话场景描述。
+
+判断要点:
+- 想"画/添加"新图形 → draw;想改已有图形的颜色/大小/位置 → edit;想删 → delete。
+- "把它/这个/刚才那个/上一个…" → target.by="focus";"N号/第N个" → target.by="number"。
+- 只输出一个 JSON 对象。
+
+示例:
+"画一个红色的大圆" → {"action":"draw","shape":"circle","color":"#e74c3c","size":"large","position":"center"}
+"在左上角画个蓝方块" → {"action":"draw","shape":"rect","color":"#3498db","size":"medium","position":"top-left"}
+"把2号变红" → {"action":"edit","target":{"by":"number","n":2},"patch":{"color":"#e74c3c"}}
+"把它放大" → {"action":"edit","target":{"by":"focus"},"patch":{"sizeStep":1}}
+"第三个挪到右下角" → {"action":"edit","target":{"by":"number","n":3},"patch":{"position":"bottom-right"}}
+"删掉第二个" → {"action":"delete","target":{"by":"number","n":2}}
+"把刚才那个删了" → {"action":"delete","target":{"by":"focus"}}
+"撤销" → {"action":"undo"}
+"清空" → {"action":"clear"}
+"渲染成夕阳下的湖边小屋" → {"action":"generate","prompt":"夕阳下的湖边小屋"}
+"画一只猫" → {"action":"unknown","reason":"暂只支持圆/方块/三角/线四种基础图形"}`
 
 /** 调用火山方舟(OpenAI 兼容)聊天补全,强制 JSON 输出。 */
 async function callDoubao(text) {
@@ -90,28 +116,73 @@ async function callSeedream(prompt) {
   return url
 }
 
-/** 把模型输出归一化为前端可执行的指令(防御式校验,带默认值)。 */
+/** 校验颜色:非空字符串原样用(Konva 接受 CSS 名与十六进制),否则给默认色。 */
+function normColor(c) {
+  return typeof c === 'string' && c.trim() ? c.trim() : DEFAULT_COLOR
+}
+
+/** 校验操作目标:{by:'number',n} 或 {by:'focus'};非法返回 null。 */
+function normTarget(t) {
+  if (t?.by === 'focus') return { by: 'focus' }
+  if (t?.by === 'number' && Number.isInteger(t.n) && t.n >= 1) return { by: 'number', n: t.n }
+  return null
+}
+
+/** 校验编辑 patch:只保留 color / sizeStep(±1) / position;全空返回 null。 */
+function normPatch(p) {
+  if (!p || typeof p !== 'object') return null
+  const out = {}
+  if (typeof p.color === 'string' && p.color.trim()) out.color = p.color.trim()
+  if (p.sizeStep === 1 || p.sizeStep === -1) out.sizeStep = p.sizeStep
+  if (POSITIONS.includes(p.position)) out.position = p.position
+  return Object.keys(out).length > 0 ? out : null
+}
+
+/** 把模型输出归一化为前端可执行的指令(防御式校验,与前端 commands.ts 对齐)。 */
 function normalize(raw) {
-  if (raw?.action === 'clear') {
-    return { ok: true, command: { action: 'clear' } }
-  }
-  if (raw?.action === 'draw') {
-    if (!SHAPES.includes(raw.shape)) {
-      return { ok: false, reason: '暂不支持这种图形(仅圆 / 方块 / 三角 / 线)' }
+  switch (raw?.action) {
+    case 'clear':
+      return { ok: true, command: { action: 'clear' } }
+    case 'undo':
+      return { ok: true, command: { action: 'undo' } }
+    case 'redo':
+      return { ok: true, command: { action: 'redo' } }
+    case 'draw':
+      if (!SHAPES.includes(raw.shape)) {
+        return { ok: false, reason: '暂不支持这种图形(仅圆 / 方块 / 三角 / 线)' }
+      }
+      return {
+        ok: true,
+        command: {
+          action: 'draw',
+          shape: raw.shape,
+          color: normColor(raw.color),
+          size: SIZES.includes(raw.size) ? raw.size : 'medium',
+          position: POSITIONS.includes(raw.position) ? raw.position : 'center',
+        },
+      }
+    case 'delete': {
+      const target = normTarget(raw.target)
+      if (!target) return { ok: false, reason: '没说清删哪个图形' }
+      return { ok: true, command: { action: 'delete', target } }
     }
-    return {
-      ok: true,
-      command: {
-        action: 'draw',
-        shape: raw.shape,
-        color: typeof raw.color === 'string' && raw.color.trim() ? raw.color.trim() : DEFAULT_COLOR,
-        size: SIZES.includes(raw.size) ? raw.size : 'medium',
-        position: POSITIONS.includes(raw.position) ? raw.position : 'center',
-      },
+    case 'edit': {
+      const target = normTarget(raw.target)
+      if (!target) return { ok: false, reason: '没说清改哪个图形' }
+      const patch = normPatch(raw.patch)
+      if (!patch) return { ok: false, reason: '没说清怎么改' }
+      return { ok: true, command: { action: 'edit', target, patch } }
+    }
+    case 'generate': {
+      const prompt = typeof raw.prompt === 'string' ? raw.prompt.trim() : ''
+      if (!prompt) return { ok: false, reason: '想渲染成什么?请说「渲染成」加画面描述' }
+      return { ok: true, command: { action: 'generate', prompt } }
+    }
+    default: {
+      const reason = typeof raw?.reason === 'string' && raw.reason ? raw.reason : '没理解这条指令'
+      return { ok: false, reason }
     }
   }
-  const reason = typeof raw?.reason === 'string' && raw.reason ? raw.reason : '没理解这条指令'
-  return { ok: false, reason }
 }
 
 const app = express()
