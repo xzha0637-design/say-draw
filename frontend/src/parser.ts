@@ -168,6 +168,15 @@ export function parse(raw: string): ParseResult {
     }
   }
 
+  // 生成式收尾:渲染 / 生成 / 出图 [+ 画面描述] → 文生图(置于绘制之前,「画一张…」不当成画形状)
+  {
+    const m = t.match(/(渲染成|渲染|生成一张|生成|出一张|出图|画一张|画一幅|做一张|做一幅)(.*)/)
+    if (m) {
+      const prompt = m[2].replace(/^[成为:,。、的]+/, '').trim()
+      return { ok: true, command: { action: 'generate', prompt } }
+    }
+  }
+
   const shape = matchShape(t)
   if (!shape) {
     return {

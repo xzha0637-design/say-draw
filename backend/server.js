@@ -7,6 +7,8 @@ const ARK_KEY = process.env.ARK_API_KEY
 const ARK_MODEL = process.env.ARK_MODEL
 // 推理模型(如 doubao-seed 系列)设为 "disabled" 可关闭"思考",解析提速 2~3 倍;非推理模型留空
 const ARK_THINKING = process.env.ARK_THINKING
+// Seedream 文生图模型(生成式收尾用);需在方舟「开通管理」开通对应模型,模型 ID 填这里
+const ARK_IMAGE_MODEL = process.env.ARK_IMAGE_MODEL
 
 // 与前端 commands.ts 对齐的取值域(后端做最终校验,不信任模型输出)
 const SHAPES = ['circle', 'rect', 'triangle', 'line']
@@ -63,6 +65,31 @@ async function callDoubao(text) {
   return JSON.parse(content)
 }
 
+/** 调用火山方舟 Seedream 文生图,返回图片 URL。 */
+async function callSeedream(prompt) {
+  const resp = await fetch(`${ARK_BASE}/images/generations`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${ARK_KEY}`,
+    },
+    body: JSON.stringify({
+      model: ARK_IMAGE_MODEL,
+      prompt,
+      size: '2048x2048', // 需 ≥ 3,686,400 像素
+      response_format: 'url',
+      watermark: false,
+    }),
+  })
+  const data = await resp.json()
+  if (!resp.ok) {
+    throw new Error(data?.error?.message || `Ark ${resp.status}`)
+  }
+  const url = data?.data?.[0]?.url
+  if (!url) throw new Error('生图返回为空')
+  return url
+}
+
 /** 把模型输出归一化为前端可执行的指令(防御式校验,带默认值)。 */
 function normalize(raw) {
   if (raw?.action === 'clear') {
@@ -107,6 +134,26 @@ app.post('/api/parse', async (req, res) => {
   } catch (e) {
     console.error('[parse] 豆包调用失败:', e?.message || e)
     res.status(502).json({ ok: false, reason: '豆包解析失败,请重试' })
+  }
+})
+
+// 场景描述 → 写实大图(Seedream 文生图,生成式收尾)
+app.post('/api/generate', async (req, res) => {
+  const prompt = (req.body?.prompt ?? '').toString().trim()
+  if (!prompt) {
+    return res.status(400).json({ ok: false, reason: '缺少 prompt' })
+  }
+  if (!ARK_KEY || !ARK_IMAGE_MODEL) {
+    return res.status(500).json({ ok: false, reason: '后端未配置 ARK_API_KEY / ARK_IMAGE_MODEL(见 backend/.env.example)' })
+  }
+  try {
+    // 追加写实风格提示,把"语音搭的场景"推向照片级真实
+    const styled = `${prompt}。写实摄影风格,真实自然光照,丰富细节,高清,色彩自然`
+    const url = await callSeedream(styled)
+    res.json({ ok: true, url })
+  } catch (e) {
+    console.error('[generate] Seedream 调用失败:', e?.message || e)
+    res.status(502).json({ ok: false, reason: `生图失败:${e?.message || '请重试'}` })
   }
 })
 

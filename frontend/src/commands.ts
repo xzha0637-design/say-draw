@@ -61,6 +61,12 @@ export interface EditCommand {
   patch: EditPatch
 }
 
+/** 生成式收尾:把语音描述(+ 画布构图)渲染成写实大图。prompt 为空时由上层兜底。 */
+export interface GenerateCommand {
+  action: 'generate'
+  prompt: string
+}
+
 export type Command =
   | DrawCommand
   | ClearCommand
@@ -68,3 +74,4 @@ export type Command =
   | RedoCommand
   | DeleteCommand
   | EditCommand
+  | GenerateCommand

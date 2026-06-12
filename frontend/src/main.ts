@@ -71,6 +71,53 @@ function showTranscript(text: string, interim: boolean): void {
     : escapeHtml(text)
 }
 
+// 生成结果覆盖层(写实大图)
+const resultOverlay = document.getElementById('result-overlay') as HTMLDivElement
+const resultImg = document.getElementById('result-img') as HTMLImageElement
+const resultCaption = document.getElementById('result-caption') as HTMLDivElement
+
+function showResultImage(url: string, caption: string): void {
+  resultImg.src = url
+  resultCaption.textContent = `🎨 ${caption}　|　说「返回」继续编辑`
+  resultOverlay.classList.remove('hidden')
+}
+function hideResultImage(): void {
+  resultOverlay.classList.add('hidden')
+  resultImg.removeAttribute('src')
+}
+
+// 画布构图 → 一句"方位参考",让生成大图大致跟随语音摆放(矢量做构图,渲染做效果)
+function describeLayout(): string {
+  const objs = store.all()
+  if (objs.length === 0) return ''
+  const names = [
+    ['左上', '正上', '右上'],
+    ['左侧', '中央', '右侧'],
+    ['左下', '正下', '右下'],
+  ]
+  const spots = objs.map((o) => {
+    const c = o.attrs.center
+    const col = c.x < 0.34 ? 0 : c.x > 0.66 ? 2 : 1
+    const row = c.y < 0.34 ? 0 : c.y > 0.66 ? 2 : 1
+    return names[row][col]
+  })
+  return `参考构图(可不严格遵循):${spots.join('、')}方位各有一个主体元素`
+}
+
+// 调用后端 Seedream 文生图;把语音描述 + 画布构图拼成最终 prompt
+async function generate(
+  prompt: string,
+): Promise<{ ok: true; url: string } | { ok: false; reason: string }> {
+  const layout = describeLayout()
+  const finalPrompt = layout ? `${prompt}。${layout}` : prompt
+  const resp = await fetch('/api/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: finalPrompt }),
+  })
+  return (await resp.json()) as { ok: true; url: string } | { ok: false; reason: string }
+}
+
 // 双路调度:规则快路 → 豆包慢路兜底
 const dispatcher = new Dispatcher(
   (cmd) => {
@@ -91,7 +138,10 @@ const dispatcher = new Dispatcher(
       }
     },
     speak: (text) => tts.speak(text),
+    showImage: showResultImage,
+    hideImage: hideResultImage,
   },
+  generate,
 )
 
 const asr = new ASR({

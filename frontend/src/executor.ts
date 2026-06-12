@@ -103,6 +103,8 @@ export class Executor {
           scale: 1,
         })
         return `已画 ${describe(cmd)}`
+      case 'generate':
+        return '' // 生成式收尾由 Dispatcher 异步处理,渲染器不参与
       default: {
         const exhaustive: never = cmd
         return exhaustive
