@@ -7,6 +7,13 @@
   </head>
   <body>
     <div id="canvas-container"></div>
+
+    <!-- 语音 HUD:麦克风按钮 + 识别字幕 -->
+    <div id="hud">
+      <button id="mic-btn" type="button">🎤 开始聆听</button>
+      <div id="transcript" class="empty">点击按钮并允许麦克风权限后,开始说话…</div>
+    </div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
