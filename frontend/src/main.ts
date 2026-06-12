@@ -90,6 +90,7 @@ const dispatcher = new Dispatcher(
         transcriptEl.textContent = '🤔 豆包理解中…'
       }
     },
+    speak: (text) => tts.speak(text),
   },
 )
 

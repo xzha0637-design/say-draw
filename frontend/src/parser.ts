@@ -1,8 +1,14 @@
-import type { Command, EditPatch, Position, ShapeKind, SizeName } from './commands'
+import type { Command, EditPatch, Position, ShapeKind, SizeName, Target } from './commands'
+
+/** 反问澄清:已识别出改动意图(patch),但没指明改哪个对象,需要追问目标。 */
+export interface ClarifyNeed {
+  need: 'target'
+  patch: EditPatch
+}
 
 export type ParseResult =
   | { ok: true; command: Command }
-  | { ok: false; reason: string }
+  | { ok: false; reason: string; clarify?: ClarifyNeed }
 
 // 关键词表(靠前优先,避免子串误匹配,如「粉红」先于「红」)
 const SHAPES: Array<{ kw: string[]; shape: ShapeKind }> = [
@@ -45,6 +51,7 @@ const ENLARGE_RE = /变大|放大|大一点|大一些|大点儿?/
 const SHRINK_RE = /变小|缩小|小一点|小一些|小点儿?/
 const RECOLOR_RE = /变|改|换|成|涂|填/
 const MOVE_KW = ['移', '挪', '放到', '移到', '挪到', '搬']
+const FOCUS_KW = ['它', '这个', '那个', '刚才', '刚画', '上一个', '最后一个', '最后那个', '这一个']
 const DEFAULT_COLOR = '#3498db'
 
 const CN_DIGIT: Record<string, number> = {
@@ -101,6 +108,11 @@ function detectSize(t: string): SizeName {
   return 'medium'
 }
 
+/** 是否用「它 / 这个 / 刚才那个」指代最近操作的图形(焦点)。 */
+function matchFocus(t: string): boolean {
+  return FOCUS_KW.some((k) => t.includes(k))
+}
+
 /** 从指令里拼出一个属性修改(改色 / 缩放 / 移动);没有可识别改动则返回 null。 */
 function buildEditPatch(t: string): EditPatch | null {
   const patch: EditPatch = {}
@@ -132,18 +144,27 @@ export function parse(raw: string): ParseResult {
     return { ok: true, command: { action: 'redo' } }
   }
 
-  // 按编号删除:含删除词 + 一个编号(「删掉 2 号」「把第三个去掉」)
+  // 删除:含删除词 + 目标(焦点「删掉这个 / 上一个」优先,否则编号「删掉 2 号」)
+  // 焦点先判:像「上一个 / 最后一个」含「一」,先抽数字会被误判成 1 号
   if (DELETE_KW.some((k) => t.includes(k))) {
+    if (matchFocus(t)) return { ok: true, command: { action: 'delete', target: { by: 'focus' } } }
     const n = extractNumber(t)
-    if (n !== null) return { ok: true, command: { action: 'delete', target: n } }
+    if (n !== null) return { ok: true, command: { action: 'delete', target: { by: 'number', n } } }
   }
 
-  // 按编号改属性:引用了某个编号 + 描述了改动(「把 2 号变红 / 变大 / 移到左上」)
-  if (/号|第.{0,3}个/.test(t)) {
-    const n = extractNumber(t)
-    if (n !== null) {
-      const patch = buildEditPatch(t)
-      if (patch) return { ok: true, command: { action: 'edit', target: n, patch } }
+  // 改属性:先看有无改动描述(变红/变大/移动),再定目标(编号 / 焦点);
+  // 有改动但没指明对象(如「变大」)→ 反问澄清,追问改哪个
+  {
+    const patch = buildEditPatch(t)
+    if (patch) {
+      const numbered = /号|第.{0,3}个/.test(t) ? extractNumber(t) : null
+      if (numbered !== null) {
+        return { ok: true, command: { action: 'edit', target: { by: 'number', n: numbered }, patch } }
+      }
+      if (matchFocus(t)) {
+        return { ok: true, command: { action: 'edit', target: { by: 'focus' }, patch } }
+      }
+      return { ok: false, reason: '要改哪一个图形?', clarify: { need: 'target', patch } }
     }
   }
 
@@ -165,4 +186,12 @@ export function parse(raw: string): ParseResult {
       position: matchPosition(t) ?? 'center',
     },
   }
+}
+
+/** 从反问的回答里抽取目标(焦点「它」优先,否则编号,如「2 号」「第二个」「2」);抽不到返回 null。 */
+export function parseAnswerTarget(raw: string): Target | null {
+  const t = raw.replace(/\s/g, '')
+  if (matchFocus(t)) return { by: 'focus' }
+  const n = extractNumber(t)
+  return n !== null ? { by: 'number', n } : null
 }

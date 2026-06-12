@@ -1,5 +1,13 @@
 import Konva from 'konva'
-import type { Command, DrawCommand, EditPatch, Position, ShapeKind, SizeName } from './commands'
+import type {
+  Command,
+  DrawCommand,
+  EditPatch,
+  Position,
+  ShapeKind,
+  SizeName,
+  Target,
+} from './commands'
 import type { Coord, SceneObject, SceneStore, ShapeAttrs } from './scene'
 
 const SIZE_PX: Record<SizeName, number> = { small: 70, medium: 130, large: 210 }
@@ -73,18 +81,19 @@ export class Executor {
       case 'redo':
         return this.store.redo() ? '已重做' : '没有可重做的操作'
       case 'delete': {
-        const obj = this.store.getByNumber(cmd.target)
-        if (!obj) return `没有 ${cmd.target} 号图形`
+        const obj = this.resolveTarget(cmd.target)
+        if (!obj) return this.noTargetMsg(cmd.target)
+        const n = obj.number
         this.store.remove(obj.id)
-        return `已删除 ${cmd.target} 号`
+        return `已删除 ${n} 号`
       }
       case 'edit': {
-        const obj = this.store.getByNumber(cmd.target)
-        if (!obj) return `没有 ${cmd.target} 号图形`
+        const obj = this.resolveTarget(cmd.target)
+        if (!obj) return this.noTargetMsg(cmd.target)
         const { patch, desc } = this.resolveEdit(obj, cmd.patch)
-        if (!patch) return `不知道要怎么改 ${cmd.target} 号`
+        if (!patch) return `不知道要怎么改 ${obj.number} 号`
         this.store.update(obj.id, patch)
-        return `已把 ${cmd.target} 号${desc}`
+        return `已把 ${obj.number} 号${desc}`
       }
       case 'draw':
         this.store.add(cmd.shape, {
@@ -99,6 +108,18 @@ export class Executor {
         return exhaustive
       }
     }
+  }
+
+  /** 解析操作目标:编号 → getByNumber;焦点指代「它 / 这个」→ getFocus(最近操作的图形)。 */
+  private resolveTarget(target: Target): SceneObject | null {
+    return target.by === 'number'
+      ? this.store.getByNumber(target.n)
+      : this.store.getFocus()
+  }
+
+  /** 目标不存在时的反馈文案。 */
+  private noTargetMsg(target: Target): string {
+    return target.by === 'number' ? `没有 ${target.n} 号图形` : '还没有可操作的图形'
   }
 
   /** 把高层 EditPatch 解析成对 ShapeAttrs 的具体修改 + 反馈文案。 */

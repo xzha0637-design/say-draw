@@ -36,6 +36,8 @@ export class SceneStore {
   private listeners: ChangeCb[] = []
   private past: SceneObject[][] = []
   private future: SceneObject[][] = []
+  // 焦点 = 最近新增 / 修改的图形,供「它 / 这个」指代
+  private focusId: string | null = null
 
   /** 新增一个图元,自动分配 id 与下一个编号,并通知渲染。 */
   add(kind: ShapeKind, attrs: ShapeAttrs): SceneObject {
@@ -47,6 +49,7 @@ export class SceneStore {
       attrs,
     }
     this.objects.push(obj)
+    this.focusId = obj.id
     this.emit()
     return obj
   }
@@ -68,6 +71,7 @@ export class SceneStore {
     if (!obj) return null
     this.snapshot()
     Object.assign(obj.attrs, patch)
+    this.focusId = obj.id
     this.emit()
     return obj
   }
@@ -105,9 +109,14 @@ export class SceneStore {
     return this.objects
   }
 
-  /** 按编号角标取对象(后续「删掉 2 号」「把 3 号变大」用)。 */
+  /** 按编号角标取对象(「删掉 2 号」「把 3 号变大」用)。 */
   getByNumber(n: number): SceneObject | null {
     return this.objects.find((o) => o.number === n) ?? null
+  }
+
+  /** 取焦点对象(最近新增 / 修改的图形),供「它 / 这个」指代;已不存在则返回 null。 */
+  getFocus(): SceneObject | null {
+    return this.objects.find((o) => o.id === this.focusId) ?? null
   }
 
   /** 订阅变更:每次增删改后回调,渲染器据此重绘。 */
