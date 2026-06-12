@@ -20,48 +20,39 @@ const POSITIONS = [
 ]
 const DEFAULT_COLOR = '#3498db'
 
-const SYSTEM_PROMPT = `你是语音绘图工具的指令解析器。把用户的一句中文语音指令解析成一个 JSON 对象,只输出 JSON,不要解释、不要 markdown 代码块。
+const SYSTEM_PROMPT = `你是语音绘图工具的指令解析器。把用户的一句中文语音指令解析成一个 JSON 对象 {"ops":[...]},ops 是按顺序执行的操作数组(一句话可能含多个操作)。只输出 JSON,不要解释、不要 markdown。
 
-可用动作 action:
-- "draw":画一个新图形。附加 shape / color / size / position。
-- "clear":清空画布。
-- "undo":撤销上一步;"redo":重做。
-- "delete":删除一个已有图形。附加 target。
-- "edit":修改一个已有图形。附加 target 和 patch。
-- "generate":把场景渲染成写实大图(用户说"渲染成…""生成一张…""画一张…的照片"等)。附加 prompt。
-- "unknown":无法理解或不支持。附加 reason。
+每个 op 的 action:
+- "draw":画一个东西。基础几何用 shape;其它任何物体(房子/猫/树/星星/汽车/爱心…)用 shape="icon" 并给 emoji 和 label。
+- "clear":清空;"undo":撤销;"redo":重做。
+- "delete":删除一个已有图形,带 target。
+- "edit":修改一个已有图形,带 target 和 patch。
+- "generate":渲染成写实大图(用户说"渲染成…""生成一张…"),带 prompt。
+- "unknown":无法理解,带 reason。
 
-字段取值:
-- shape: "circle"(圆) | "rect"(方块/矩形/正方形) | "triangle"(三角) | "line"(线)。只支持这四种,其他形状(房子/猫…)用 unknown。
-- color: CSS 颜色,十六进制如 "#87CEEB" 或英文名如 "red";判断不了填 ""。("天蓝"→"#87CEEB")
-- size: "small"(小/迷你) | "medium"(中/默认) | "large"(大/巨大)。
-- position: "top-left" "top" "top-right" "left" "center" "right" "bottom-left" "bottom" "bottom-right"(九宫格,判断不了填 "center")。
-- target(delete/edit 用,指明操作哪个图形):
-  - 按编号: {"by":"number","n":2}(用户说"2号""第二个")
-  - 指代最近操作的: {"by":"focus"}(用户说"它""这个""刚才那个""上一个")
-- patch(edit 用,只填用户提到的项):
-  - "color": CSS 颜色(改颜色)
-  - "sizeStep": 1(变大/放大)或 -1(变小/缩小)
-  - "position": 九宫格之一(移动到某处)
-- prompt(generate 用): 用户想要的画面描述文字,尽量保留原话场景描述。
+字段:
+- shape: "circle"(圆) "rect"(方/矩形) "triangle"(三角) "line"(线) —— 仅这四种基础几何;其它物体一律用 "icon"。
+- emoji: shape="icon" 时必填,选最贴切的一个 emoji(房子→🏠 猫→🐱 树→🌳 太阳→☀️ 星星→⭐ 汽车→🚗 花→🌸 月亮→🌙 房车人山水…都给对应 emoji)。
+- label: 物体中文名(房子/猫…),draw 尽量都填。
+- color: CSS 颜色十六进制或英文名,判断不了填 "";size: small|medium|large;position: top-left|top|top-right|left|center|right|bottom-left|bottom|bottom-right(判断不了填 center)。
+- target: {"by":"number","n":2}("2号""第二个") 或 {"by":"focus"}("它""这个""刚才那个""上一个")。
+- patch(edit,只填提到的): color / sizeStep(1变大 -1变小) / position。
+- prompt(generate): 画面描述文字。
 
-判断要点:
-- 想"画/添加"新图形 → draw;想改已有图形的颜色/大小/位置 → edit;想删 → delete。
-- "把它/这个/刚才那个/上一个…" → target.by="focus";"N号/第N个" → target.by="number"。
-- 只输出一个 JSON 对象。
+要点:
+- 想"画/添加"新东西 → draw;基础几何用对应 shape,其它物体一律 icon+emoji(几乎不用 unknown)。
+- 一句话多个动作 → ops 放多个,按说话顺序。
+- 严格只输出 {"ops":[...]} 一个 JSON。
 
 示例:
-"画一个红色的大圆" → {"action":"draw","shape":"circle","color":"#e74c3c","size":"large","position":"center"}
-"在左上角画个蓝方块" → {"action":"draw","shape":"rect","color":"#3498db","size":"medium","position":"top-left"}
-"把2号变红" → {"action":"edit","target":{"by":"number","n":2},"patch":{"color":"#e74c3c"}}
-"把它放大" → {"action":"edit","target":{"by":"focus"},"patch":{"sizeStep":1}}
-"第三个挪到右下角" → {"action":"edit","target":{"by":"number","n":3},"patch":{"position":"bottom-right"}}
-"删掉第二个" → {"action":"delete","target":{"by":"number","n":2}}
-"把刚才那个删了" → {"action":"delete","target":{"by":"focus"}}
-"撤销" → {"action":"undo"}
-"清空" → {"action":"clear"}
-"渲染成夕阳下的湖边小屋" → {"action":"generate","prompt":"夕阳下的湖边小屋"}
-"画一只猫" → {"action":"unknown","reason":"暂只支持圆/方块/三角/线四种基础图形"}`
+"画一个红色的大圆" → {"ops":[{"action":"draw","shape":"circle","color":"#e74c3c","size":"large","position":"center","label":"圆"}]}
+"画一个房子" → {"ops":[{"action":"draw","shape":"icon","emoji":"🏠","label":"房子","size":"medium","position":"center"}]}
+"左边画棵树右边画个太阳" → {"ops":[{"action":"draw","shape":"icon","emoji":"🌳","label":"树","size":"medium","position":"left"},{"action":"draw","shape":"icon","emoji":"☀️","label":"太阳","size":"medium","position":"top-right"}]}
+"画个圆再把它变红" → {"ops":[{"action":"draw","shape":"circle","size":"medium","position":"center","label":"圆"},{"action":"edit","target":{"by":"focus"},"patch":{"color":"#e74c3c"}}]}
+"把2号变红,3号删掉" → {"ops":[{"action":"edit","target":{"by":"number","n":2},"patch":{"color":"#e74c3c"}},{"action":"delete","target":{"by":"number","n":3}}]}
+"撤销" → {"ops":[{"action":"undo"}]}
+"清空" → {"ops":[{"action":"clear"}]}
+"渲染成夕阳下的湖边小屋" → {"ops":[{"action":"generate","prompt":"夕阳下的湖边小屋"}]}`
 
 /** 调用火山方舟(OpenAI 兼容)聊天补全,强制 JSON 输出。 */
 async function callDoubao(text) {
@@ -138,51 +129,60 @@ function normPatch(p) {
   return Object.keys(out).length > 0 ? out : null
 }
 
-/** 把模型输出归一化为前端可执行的指令(防御式校验,与前端 commands.ts 对齐)。 */
-function normalize(raw) {
+/** 校验并归一化单个操作 → 前端 Command;非法返回 null。 */
+function normalizeOne(raw) {
+  const label = typeof raw?.label === 'string' && raw.label.trim() ? raw.label.trim() : undefined
   switch (raw?.action) {
     case 'clear':
-      return { ok: true, command: { action: 'clear' } }
+      return { action: 'clear' }
     case 'undo':
-      return { ok: true, command: { action: 'undo' } }
+      return { action: 'undo' }
     case 'redo':
-      return { ok: true, command: { action: 'redo' } }
-    case 'draw':
-      if (!SHAPES.includes(raw.shape)) {
-        return { ok: false, reason: '暂不支持这种图形(仅圆 / 方块 / 三角 / 线)' }
+      return { action: 'redo' }
+    case 'draw': {
+      const base = {
+        action: 'draw',
+        color: normColor(raw.color),
+        size: SIZES.includes(raw.size) ? raw.size : 'medium',
+        position: POSITIONS.includes(raw.position) ? raw.position : 'center',
+        label,
       }
-      return {
-        ok: true,
-        command: {
-          action: 'draw',
-          shape: raw.shape,
-          color: normColor(raw.color),
-          size: SIZES.includes(raw.size) ? raw.size : 'medium',
-          position: POSITIONS.includes(raw.position) ? raw.position : 'center',
-        },
+      if (raw.shape === 'icon') {
+        const emoji = typeof raw.emoji === 'string' && raw.emoji.trim() ? raw.emoji.trim() : null
+        return emoji ? { ...base, shape: 'icon', emoji } : null
       }
+      return SHAPES.includes(raw.shape) ? { ...base, shape: raw.shape } : null
+    }
     case 'delete': {
       const target = normTarget(raw.target)
-      if (!target) return { ok: false, reason: '没说清删哪个图形' }
-      return { ok: true, command: { action: 'delete', target } }
+      return target ? { action: 'delete', target } : null
     }
     case 'edit': {
       const target = normTarget(raw.target)
-      if (!target) return { ok: false, reason: '没说清改哪个图形' }
       const patch = normPatch(raw.patch)
-      if (!patch) return { ok: false, reason: '没说清怎么改' }
-      return { ok: true, command: { action: 'edit', target, patch } }
+      return target && patch ? { action: 'edit', target, patch } : null
     }
     case 'generate': {
       const prompt = typeof raw.prompt === 'string' ? raw.prompt.trim() : ''
-      if (!prompt) return { ok: false, reason: '想渲染成什么?请说「渲染成」加画面描述' }
-      return { ok: true, command: { action: 'generate', prompt } }
+      return prompt ? { action: 'generate', prompt } : null
     }
-    default: {
-      const reason = typeof raw?.reason === 'string' && raw.reason ? raw.reason : '没理解这条指令'
-      return { ok: false, reason }
-    }
+    default:
+      return null
   }
+}
+
+/** 把模型输出 {ops:[...]} 归一化为前端可执行的指令数组(一句话可含多个操作)。 */
+function normalizeOps(raw) {
+  const ops = Array.isArray(raw?.ops) ? raw.ops : []
+  const commands = []
+  let reason = '没理解这条指令'
+  for (const op of ops) {
+    if (op?.action === 'unknown' && typeof op.reason === 'string' && op.reason) reason = op.reason
+    const c = normalizeOne(op)
+    if (c) commands.push(c)
+  }
+  if (commands.length === 0) return { ok: false, reason }
+  return { ok: true, commands }
 }
 
 const app = express()
@@ -201,7 +201,7 @@ app.post('/api/parse', async (req, res) => {
     return res.status(500).json({ ok: false, reason: '后端未配置 ARK_API_KEY / ARK_MODEL(见 backend/.env.example)' })
   }
   try {
-    res.json(normalize(await callDoubao(text)))
+    res.json(normalizeOps(await callDoubao(text)))
   } catch (e) {
     console.error('[parse] 豆包调用失败:', e?.message || e)
     res.status(502).json({ ok: false, reason: '豆包解析失败,请重试' })

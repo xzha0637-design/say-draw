@@ -31,6 +31,7 @@ const SHAPE_CN: Record<ShapeKind, string> = {
   rect: '方块',
   triangle: '三角形',
   line: '线',
+  icon: '图案',
 }
 const POS_CN: Record<Position, string> = {
   'top-left': '左上',
@@ -46,7 +47,8 @@ const POS_CN: Record<Position, string> = {
 const SIZE_CN: Record<SizeName, string> = { small: '小', medium: '中', large: '大' }
 
 function describe(cmd: DrawCommand): string {
-  return `${SIZE_CN[cmd.size]}号${SHAPE_CN[cmd.shape]}(${POS_CN[cmd.position]})`
+  const what = cmd.shape === 'icon' ? (cmd.label ?? cmd.emoji ?? '图案') : SHAPE_CN[cmd.shape]
+  return `${SIZE_CN[cmd.size]}号${what}(${POS_CN[cmd.position]})`
 }
 
 /**
@@ -101,6 +103,8 @@ export class Executor {
           size: cmd.size,
           center: GRID_FRAC[cmd.position],
           scale: 1,
+          emoji: cmd.emoji,
+          label: cmd.label,
         })
         return `已画 ${describe(cmd)}`
       case 'generate':
@@ -173,7 +177,7 @@ export class Executor {
     const px = SIZE_PX[obj.attrs.size] * obj.attrs.scale
     const { x, y } = this.toPixel(obj.attrs.center, px / 2)
     const g = new Konva.Group({ x, y })
-    g.add(this.createShape(obj.kind, px, obj.attrs.color))
+    g.add(this.createShape(obj.kind, px, obj.attrs.color, obj.attrs.emoji))
     g.add(this.numberBadge(obj.number, px))
     return g
   }
@@ -203,7 +207,12 @@ export class Executor {
   }
 
   /** 创建以原点(0,0)为中心的图元主体。 */
-  private createShape(shape: ShapeKind, size: number, color: string): Konva.Shape {
+  private createShape(
+    shape: ShapeKind,
+    size: number,
+    color: string,
+    emoji?: string,
+  ): Konva.Shape {
     const r = size / 2
     switch (shape) {
       case 'circle':
@@ -226,6 +235,13 @@ export class Executor {
           strokeWidth: 8,
           lineCap: 'round',
         })
+      case 'icon': {
+        // 任意物体:渲染 emoji 文本,以原点为中心
+        const t = new Konva.Text({ text: emoji ?? '❓', fontSize: size, fontFamily: 'sans-serif' })
+        t.offsetX(t.width() / 2)
+        t.offsetY(t.height() / 2)
+        return t
+      }
       default: {
         const exhaustive: never = shape
         return exhaustive

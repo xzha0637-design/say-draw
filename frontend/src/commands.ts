@@ -1,7 +1,8 @@
 // 绘图指令的数据模型
 // PR3 由规则解析产出;PR4 起将由 Claude 产出同样结构(结构化输出)。
 
-export type ShapeKind = 'circle' | 'rect' | 'triangle' | 'line'
+// 基础几何图元 + 'icon'(用 emoji 表示任意物体:房子/猫/树/星星…)
+export type ShapeKind = 'circle' | 'rect' | 'triangle' | 'line' | 'icon'
 
 export type SizeName = 'small' | 'medium' | 'large'
 
@@ -19,9 +20,11 @@ export type Position =
 export interface DrawCommand {
   action: 'draw'
   shape: ShapeKind
-  color: string // 解析后的 CSS 颜色值
+  color: string // 解析后的 CSS 颜色值(icon 用 emoji 自带颜色,可忽略)
   size: SizeName
   position: Position
+  emoji?: string // shape==='icon' 时:渲染的 emoji(支持任意物体)
+  label?: string // 语义名(房子 / 猫…),用于反馈文案与生成 prompt
 }
 
 export interface ClearCommand {

@@ -1,6 +1,6 @@
 import type { Command } from './commands'
 
-type SlowResp = { ok: true; command: Command } | { ok: false; reason: string }
+type SlowResp = { ok: true; commands: Command[] } | { ok: false; reason: string }
 export type GenResult = { ok: true; url: string } | { ok: false; reason: string }
 
 export interface DispatcherUI {
@@ -55,11 +55,17 @@ export class Dispatcher {
       this.ui.showResult(`「${text}」—— ${resp.reason}`)
       return
     }
-    const cmd = resp.command
-    if (cmd.action === 'generate') {
-      await this.runGenerate(cmd.prompt, text)
-    } else {
-      this.ui.showResult(`「${text}」→ ${this.execute(cmd)}`)
+    // 一句话可能含多个操作,按序执行;generate 走异步生图分支
+    const feedbacks: string[] = []
+    for (const cmd of resp.commands) {
+      if (cmd.action === 'generate') {
+        await this.runGenerate(cmd.prompt, text)
+      } else {
+        feedbacks.push(this.execute(cmd))
+      }
+    }
+    if (feedbacks.length > 0) {
+      this.ui.showResult(`「${text}」→ ${feedbacks.join(';')}`)
     }
   }
 

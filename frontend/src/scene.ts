@@ -12,6 +12,8 @@ export interface ShapeAttrs {
   size: SizeName
   center: Coord
   scale: number
+  emoji?: string // kind==='icon' 时渲染的 emoji
+  label?: string // 语义名(房子 / 猫…),用于生成 prompt
 }
 
 /** 场景中的一个被追踪对象:有稳定 id 与从 1 起的编号角标。 */
