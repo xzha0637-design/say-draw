@@ -40,7 +40,44 @@ const POSITIONS: Array<{ kw: string[]; pos: Position }> = [
 const CLEAR_KW = ['清空', '清除', '清屏', '清掉', '全部删除', '删掉全部']
 const UNDO_KW = ['撤销', '撤回', '退回', '回退', '上一步']
 const REDO_KW = ['重做', '恢复']
+const DELETE_KW = ['删', '去掉', '去除', '移除', '擦掉', '擦除']
 const DEFAULT_COLOR = '#3498db'
+
+const CN_DIGIT: Record<string, number> = {
+  零: 0,
+  一: 1,
+  二: 2,
+  两: 2,
+  三: 3,
+  四: 4,
+  五: 5,
+  六: 6,
+  七: 7,
+  八: 8,
+  九: 9,
+}
+
+/** 从指令中抽取第一个编号(阿拉伯数字优先,其次中文 1~99,如「2 号」「第三个」)。 */
+function extractNumber(t: string): number | null {
+  const ara = t.match(/\d+/)
+  if (ara) return parseInt(ara[0], 10)
+  const run = t.match(/[零一二两三四五六七八九十]+/)
+  if (!run) return null
+  return parseCnRun(run[0])
+}
+
+/** 解析一段连续中文数字(支持 1~99 的「十」位写法)。 */
+function parseCnRun(s: string): number | null {
+  if (s === '十') return 10
+  if (s.includes('十')) {
+    const [a, b] = s.split('十')
+    const tens = a ? (CN_DIGIT[a] ?? 1) : 1
+    const ones = b ? (CN_DIGIT[b[0]] ?? 0) : 0
+    return tens * 10 + ones
+  }
+  const d = CN_DIGIT[s[0]]
+  return d === undefined ? null : d
+}
 
 function matchShape(t: string): ShapeKind | null {
   for (const e of SHAPES) if (e.kw.some((k) => t.includes(k))) return e.shape
@@ -75,6 +112,12 @@ export function parse(raw: string): ParseResult {
   }
   if (REDO_KW.some((k) => t.includes(k))) {
     return { ok: true, command: { action: 'redo' } }
+  }
+
+  // 按编号删除:含删除词 + 一个编号(「删掉 2 号」「把第三个去掉」)
+  if (DELETE_KW.some((k) => t.includes(k))) {
+    const n = extractNumber(t)
+    if (n !== null) return { ok: true, command: { action: 'delete', target: n } }
   }
 
   const shape = matchShape(t)
