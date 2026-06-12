@@ -1,6 +1,8 @@
 import Konva from 'konva'
 import './style.css'
 import { ASR } from './asr'
+import { parse } from './parser'
+import { Executor } from './executor'
 
 const containerId = 'canvas-container'
 const container = document.getElementById(containerId) as HTMLDivElement
@@ -15,9 +17,9 @@ const stage = new Konva.Stage({
 const layer = new Konva.Layer()
 stage.add(layer)
 
-// 占位提示(后续 PR 接入绘图执行)
+// 用法提示(首次成功绘图后隐藏)
 const hint = new Konva.Text({
-  text: 'say-draw\n空画布已就绪 · 等待接入语音绘图',
+  text: 'say-draw\n试着说:「画一个红色的圆」',
   fontSize: 22,
   fontFamily: 'sans-serif',
   fill: '#cccccc',
@@ -42,6 +44,8 @@ window.addEventListener('resize', () => {
   centerHint()
 })
 
+const executor = new Executor(stage, layer)
+
 // ---- 语音识别 HUD ----
 const micBtn = document.getElementById('mic-btn') as HTMLButtonElement
 const transcriptEl = document.getElementById('transcript') as HTMLDivElement
@@ -63,14 +67,28 @@ function showTranscript(text: string, interim: boolean): void {
     : escapeHtml(text)
 }
 
+// 最终识别结果 → 规则解析 → 执行引擎
+function handleCommand(text: string): void {
+  const result = parse(text)
+  if (result.ok) {
+    const feedback = executor.execute(result.command)
+    if (hint.visible()) {
+      hint.visible(false)
+      layer.draw()
+    }
+    showTranscript(`「${text}」→ ${feedback}`, false)
+  } else {
+    showTranscript(`「${text}」—— ${result.reason}`, false)
+  }
+}
+
 const asr = new ASR({
   onListeningChange: (listening) => {
     micBtn.classList.toggle('listening', listening)
     micBtn.textContent = listening ? '⏹ 停止聆听' : '🎤 开始聆听'
   },
   onInterim: (text) => showTranscript(text, true),
-  // PR2:仅把最终识别结果显示出来;后续 PR 会把它送去解析为绘图指令
-  onFinal: (text) => showTranscript(text, false),
+  onFinal: (text) => handleCommand(text),
   onError: (msg) => {
     transcriptEl.classList.remove('empty')
     transcriptEl.textContent = msg
