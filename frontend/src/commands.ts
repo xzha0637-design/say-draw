@@ -36,10 +36,13 @@ export interface RedoCommand {
   action: 'redo'
 }
 
-/** 按编号删除一个图形(target = 角标编号,从 1 起)。 */
+/** 操作目标:按编号角标,或「它 / 这个」指代最近操作的图形(焦点)。 */
+export type Target = { by: 'number'; n: number } | { by: 'focus' }
+
+/** 删除一个图形(按编号或焦点指代)。 */
 export interface DeleteCommand {
   action: 'delete'
-  target: number
+  target: Target
 }
 
 export type SizeStep = 1 | -1
@@ -51,10 +54,10 @@ export interface EditPatch {
   position?: Position // 移动到九宫格位置
 }
 
-/** 按编号修改一个图形的属性。 */
+/** 修改一个图形的属性(按编号或焦点指代)。 */
 export interface EditCommand {
   action: 'edit'
-  target: number
+  target: Target
   patch: EditPatch
 }
 
