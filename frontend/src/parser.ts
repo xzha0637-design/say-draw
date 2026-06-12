@@ -1,8 +1,14 @@
 import type { Command, EditPatch, Position, ShapeKind, SizeName, Target } from './commands'
 
+/** 反问澄清:已识别出改动意图(patch),但没指明改哪个对象,需要追问目标。 */
+export interface ClarifyNeed {
+  need: 'target'
+  patch: EditPatch
+}
+
 export type ParseResult =
   | { ok: true; command: Command }
-  | { ok: false; reason: string }
+  | { ok: false; reason: string; clarify?: ClarifyNeed }
 
 // 关键词表(靠前优先,避免子串误匹配,如「粉红」先于「红」)
 const SHAPES: Array<{ kw: string[]; shape: ShapeKind }> = [
@@ -146,16 +152,19 @@ export function parse(raw: string): ParseResult {
     if (n !== null) return { ok: true, command: { action: 'delete', target: { by: 'number', n } } }
   }
 
-  // 改属性:引用了目标(编号或焦点「它 / 这个」)+ 描述了改动(「把 2 号变红」「把它变大」)
+  // 改属性:先看有无改动描述(变红/变大/移动),再定目标(编号 / 焦点);
+  // 有改动但没指明对象(如「变大」)→ 反问澄清,追问改哪个
   {
-    const numbered = /号|第.{0,3}个/.test(t) ? extractNumber(t) : null
-    const focused = matchFocus(t)
-    if (numbered !== null || focused) {
-      const patch = buildEditPatch(t)
-      if (patch) {
-        const target: Target = numbered !== null ? { by: 'number', n: numbered } : { by: 'focus' }
-        return { ok: true, command: { action: 'edit', target, patch } }
+    const patch = buildEditPatch(t)
+    if (patch) {
+      const numbered = /号|第.{0,3}个/.test(t) ? extractNumber(t) : null
+      if (numbered !== null) {
+        return { ok: true, command: { action: 'edit', target: { by: 'number', n: numbered }, patch } }
       }
+      if (matchFocus(t)) {
+        return { ok: true, command: { action: 'edit', target: { by: 'focus' }, patch } }
+      }
+      return { ok: false, reason: '要改哪一个图形?', clarify: { need: 'target', patch } }
     }
   }
 
@@ -177,4 +186,12 @@ export function parse(raw: string): ParseResult {
       position: matchPosition(t) ?? 'center',
     },
   }
+}
+
+/** 从反问的回答里抽取目标(焦点「它」优先,否则编号,如「2 号」「第二个」「2」);抽不到返回 null。 */
+export function parseAnswerTarget(raw: string): Target | null {
+  const t = raw.replace(/\s/g, '')
+  if (matchFocus(t)) return { by: 'focus' }
+  const n = extractNumber(t)
+  return n !== null ? { by: 'number', n } : null
 }
