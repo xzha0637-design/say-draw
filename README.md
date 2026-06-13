@@ -58,6 +58,7 @@
 - **Node.js ≥ 18**(含 npm):https://nodejs.org ,或 macOS `brew install node`
 - **Git**
 - **浏览器:Chrome 或 Edge**(语音识别依赖 Web Speech API;Safari / Firefox 不保证)
+  - ⚠️ **Chrome 的语音识别走 Google 云端服务**,网络无法访问 Google 时(内地直连常见)识别会报错——此时请**改用 Microsoft Edge**(识别走微软服务,直连可用),或确保代理可达。页面状态栏会给出具体错误与指引。
 - 一个可用的**麦克风**
 
 ### 2. 获取代码

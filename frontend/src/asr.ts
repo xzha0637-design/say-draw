@@ -40,6 +40,23 @@ function getCtor(): SpeechRecognitionCtor | null {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null
 }
 
+/** 把 getUserMedia 的具体异常翻译成可操作的中文提示。 */
+function micErrorMessage(e: unknown): string {
+  const name = e instanceof DOMException ? e.name : ''
+  switch (name) {
+    case 'NotAllowedError':
+      return '麦克风权限被拒绝:① 地址栏 🔒 → 麦克风 = 允许;② macOS 系统设置 → 隐私与安全性 → 麦克风 → 勾选本浏览器(改后需重启浏览器)'
+    case 'NotFoundError':
+      return '没有检测到麦克风设备'
+    case 'NotReadableError':
+      return '麦克风被其它应用占用,关闭占用它的程序后重试'
+    case 'SecurityError':
+      return '当前地址不安全:语音功能仅在 http://localhost:5173(或 https)下可用'
+    default:
+      return `无法访问麦克风:${name || String(e)}`
+  }
+}
+
 /**
  * 语音识别封装(Web Speech API)。
  * - 中文识别(zh-CN),连续模式 + 静音自动重启 → 实现"持续聆听"。
@@ -63,11 +80,20 @@ export class ASR {
     return this.wantListening
   }
 
-  start(): void {
+  async start(): Promise<void> {
     if (this.wantListening) return
     const Ctor = getCtor()
     if (!Ctor) {
       this.cb.onError?.('当前浏览器不支持 Web Speech API,请使用 Chrome 或 Edge。')
+      return
+    }
+    // 预检:直接向浏览器要一次麦克风再立刻释放。SpeechRecognition 自身把"站点权限/系统权限/
+    // 识别服务不可用"全报成 not-allowed,无从排查;getUserMedia 能给出具体原因,且顺带完成授权弹窗。
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      stream.getTracks().forEach((t) => t.stop())
+    } catch (e) {
+      this.cb.onError?.(micErrorMessage(e))
       return
     }
     this.wantListening = true
@@ -104,12 +130,18 @@ export class ASR {
     }
 
     rec.onerror = (e) => {
-      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-        // 权限被拒:先归位聆听状态,再给可操作提示——顺序很重要,
-        // 反过来的话 onListeningChange 触发的默认文案会立刻覆盖错误提示,用户只见按钮弹回、不见原因
+      // 不可自愈的三类错误:先归位聆听状态,再给可操作提示——顺序很重要,
+      // 反过来的话 onListeningChange 触发的默认文案会立刻覆盖错误提示,用户只见按钮弹回、不见原因。
+      // 预检已确认麦克风可用,所以这里的 not-allowed 指的是"识别服务"而非麦克风权限:
+      // Chrome 的语音识别走 Google 云端服务,网络不可达(如内地直连)即失败,Edge(微软服务)不受影响。
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed' || e.error === 'network') {
         this.wantListening = false
         this.cb.onListeningChange?.(false)
-        this.cb.onError?.('麦克风权限被拒绝:点击地址栏左侧 🔒/ⓘ → 麦克风 → 允许,然后重试')
+        this.cb.onError?.(
+          e.error === 'network'
+            ? '连不上语音识别服务(network):Chrome 的识别依赖 Google 服务,请检查网络/代理,或改用 Microsoft Edge'
+            : '麦克风正常,但浏览器的语音识别服务不可用:Chrome 识别依赖 Google 服务;请检查网络/代理,或改用 Microsoft Edge',
+        )
         return
       }
       // no-speech / aborted 属正常静默;其余上报

@@ -256,6 +256,6 @@ if (!ASR.supported) {
 } else {
   micBtn.addEventListener('click', () => {
     if (asr.listening) asr.stop()
-    else asr.start()
+    else void asr.start()
   })
 }
