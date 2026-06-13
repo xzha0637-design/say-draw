@@ -66,6 +66,7 @@ export class ASR {
   private recognition: SpeechRecognitionLike | null = null
   private wantListening = false
   private spawnedAt = 0
+  private failStreak = 0
   private readonly cb: ASRCallbacks
 
   constructor(cb: ASRCallbacks = {}) {
@@ -115,6 +116,7 @@ export class ASR {
     rec.maxAlternatives = 1
 
     rec.onresult = (e) => {
+      this.failStreak = 0 // 有结果到达 = 链路正常,清空失败计数
       let interim = ''
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const result = e.results[i]
@@ -134,14 +136,20 @@ export class ASR {
       // 反过来的话 onListeningChange 触发的默认文案会立刻覆盖错误提示,用户只见按钮弹回、不见原因。
       // 预检已确认麦克风可用,所以这里的 not-allowed 指的是"识别服务"而非麦克风权限:
       // Chrome 的语音识别走 Google 云端服务,网络不可达(如内地直连)即失败,Edge(微软服务)不受影响。
-      if (e.error === 'not-allowed' || e.error === 'service-not-allowed' || e.error === 'network') {
+      if (e.error === 'network') {
+        // 网络抖动很常见:先靠 onend 的退避重启静默自愈,连续 3 次失败才停下并指引,
+        // 避免一次瞬断就把用户踢出聆听模式
+        this.failStreak++
+        if (this.failStreak < 3) return
         this.wantListening = false
         this.cb.onListeningChange?.(false)
-        this.cb.onError?.(
-          e.error === 'network'
-            ? '连不上语音识别服务(network):Chrome 的识别依赖 Google 服务,请检查网络/代理,或改用 Microsoft Edge'
-            : '麦克风正常,但浏览器的语音识别服务不可用:Chrome 识别依赖 Google 服务;请检查网络/代理,或改用 Microsoft Edge',
-        )
+        this.cb.onError?.('连不上语音识别服务(network):Chrome 的识别依赖 Google 服务,请检查网络/代理,或改用 Microsoft Edge')
+        return
+      }
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        this.wantListening = false
+        this.cb.onListeningChange?.(false)
+        this.cb.onError?.('麦克风正常,但浏览器的语音识别服务不可用:Chrome 识别依赖 Google 服务;请检查网络/代理,或改用 Microsoft Edge')
         return
       }
       // no-speech / aborted 属正常静默;其余上报

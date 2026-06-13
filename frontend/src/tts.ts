@@ -39,14 +39,21 @@ export class TTS {
 
   /**
    * 回声判定:识别到的文本是否只是"刚朗读内容"被麦克风听回来了。
-   * 仅在朗读中或刚结束的尾音窗口内生效;以归一化后的互为子串近似判断。
+   * 窗口:朗读中,或结束后 3s 内(识别器对朗读期音频的 final 结果会迟到 1~3s)。
+   * 判法:字符重合率,而非子串精确匹配——同音字会让回声与原文字面不一致(画/花),
+   * 但大半字符仍会命中;听到的内容 ≥50% 字符出现在刚朗读文本里 → 判为回声。
+   * 代价(有意取舍):朗读窗口内,若用户指令的用字与刚朗读内容高度重合,可能被误吞;
+   * 打断时用与播报不同的措辞(如"停""不对")即可,执行类指令等半秒说效果最好。
    */
   isEcho(heard: string): boolean {
     if (!this.lastNorm) return false
-    if (!this.speakingNow && Date.now() - this.endedAt > 1500) return false
+    if (!this.speakingNow && Date.now() - this.endedAt > 3000) return false
     const h = norm(heard)
-    if (!h) return true // 朗读窗口内的纯标点/空白碎片,当回声丢弃
-    return this.lastNorm.includes(h) || h.includes(this.lastNorm)
+    if (h.length < 2) return true // 朗读窗口内的超短碎片不值得打断,当回声丢弃
+    const chars = new Set(this.lastNorm)
+    let hit = 0
+    for (const c of h) if (chars.has(c)) hit++
+    return hit / h.length >= 0.5
   }
 
   /** 朗读一段文本;打断上一句以保证播报的是最新反馈。 */
