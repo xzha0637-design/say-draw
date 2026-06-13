@@ -4,7 +4,8 @@
 // 检查点:每次生成/改图都自动存为一个版本;可「回到第N张」跳回任意版本继续改(从任一检查点分叉),
 //        「撤销」回上一张,「收藏」标记当前版本。
 //
-// 记忆:history[] 随每次请求发给豆包,并持久化 localStorage(图片 URL 会过期,不持久化,仅本会话内有效)。
+// 持久化:不再用 localStorage,而是把整段会话快照(history/scene/versions/index)经 hooks.persist
+//   交给上层写入服务端(按 user_id × session_id 隔离);图片是入库的持久 URL,可长期展示与下载。
 
 export type ChatRole = 'user' | 'assistant'
 export interface ChatMsg {
@@ -40,18 +41,37 @@ export interface VersionView {
   current: boolean
 }
 
+/** 一个版本检查点:持久图片 URL + 下载链接 + 入库 id(改图作参考)+ 场景图快照。 */
+export interface ImgVersion {
+  url: string
+  downloadUrl: string
+  imageId: string
+  starred: boolean
+  scene: Scene | null
+}
+
+/** 会话快照:服务端持久化与跨会话切换的载体。 */
+export interface Snapshot {
+  history: ChatMsg[]
+  scene: Scene | null
+  versions: ImgVersion[]
+  currentIndex: number
+}
+
 type ChatResp =
   | { ok: true; action: 'chat'; reply: string; scene?: Scene }
   | { ok: true; action: 'generate' | 'edit'; reply: string; prompt: string; scene?: Scene }
   | { ok: true; action: 'multi'; reply: string; steps: string[] }
   | { ok: false; reason: string }
 
-export type GenResult = { ok: true; url: string } | { ok: false; reason: string }
+export type GenResult =
+  | { ok: true; url: string; downloadUrl?: string; imageId?: string }
+  | { ok: false; reason: string }
 
 export interface ChatUI {
   addMessage: (role: ChatRole, text: string) => HTMLElement
-  /** 在对话流追加一张图片(label 如"第2张";点击可放大)。 */
-  addImage: (url: string, label?: string) => void
+  /** 在对话流追加一张图片(label 如"第2张";点击放大;downloadUrl 给下载按钮)。 */
+  addImage: (url: string, label?: string, downloadUrl?: string) => void
   /** 渲染底部版本条(检查点总览)。 */
   renderVersions: (items: VersionView[]) => void
   /** 渲染画面要素板(语义画布);changed 指明本轮变更、需闪烁的部分。 */
@@ -63,17 +83,16 @@ export interface ChatUI {
   speak: (text: string) => void
 }
 
-interface ImgVersion {
-  url: string
-  starred: boolean
-  /** 该版本出图时的场景图快照;跳回该版本时一并恢复(存 spec 而非仅位图)。 */
-  scene: Scene | null
+/** 上层注入的持久化与会话管理钩子。 */
+export interface ConversationHooks {
+  /** 每次状态变化后调用:把快照交给上层(防抖)写服务端。 */
+  persist: (snap: Snapshot) => void
+  /** 语音「新对话」时调用:由上层新建并切换到一个全新服务端会话。 */
+  onNewSession: () => void
 }
 
-const STORAGE_KEY = 'saydraw-chat-history'
-const MAX_STORED = 60
 const MAX_SENT = 20
-const RESET_RE = /^(清空对话|清空记忆|重新开始|重新来过|重置对话|换个新对话|新对话)$/
+const RESET_RE = /^(清空对话|清空记忆|重新开始|重新来过|重置对话|换个新对话|新对话|新会话|新建会话)$/
 const UNDO_RE = /^(撤销|上一张|退回|回到上一张|返回上一张|还原)$/
 const STAR_RE = /^(保存|收藏|记一下|存一下|存下来|保存这张|收藏这张|保存检查点|存个档)$/
 // 跳到某版本:整句形如「回到第2张」「用第三张」「第3张」
@@ -89,6 +108,7 @@ function toIndex(token: string): number | null {
 /**
  * 会话控制器:语音文本进 → 聊 / 生成 / 改图 / 版本回退 出。
  * 维护版本数组(检查点)与当前指针;edit 以当前版本为参考,可从任一版本分叉。
+ * 状态变化经 hooks.persist 上抛由上层持久化到服务端。
  */
 export class Conversation {
   private history: ChatMsg[] = []
@@ -99,15 +119,15 @@ export class Conversation {
 
   constructor(
     private readonly ui: ChatUI,
-    private readonly generate: (prompt: string, image?: string) => Promise<GenResult>,
-  ) {
-    const saved = this.load()
-    this.history = saved.h
-    this.scene = saved.s
-  }
+    private readonly generate: (prompt: string, refImageId?: string) => Promise<GenResult>,
+    private readonly hooks: ConversationHooks,
+  ) {}
 
   private get currentImage(): string | null {
     return this.currentIndex >= 0 ? this.versions[this.currentIndex].url : null
+  }
+  private get currentImageId(): string | undefined {
+    return this.currentIndex >= 0 ? this.versions[this.currentIndex].imageId || undefined : undefined
   }
 
   /** 是否已有出图版本(供界面按状态给"你可以说…"提示)。 */
@@ -115,11 +135,30 @@ export class Conversation {
     return this.versions.length > 0
   }
 
-  /** 重放历史文字气泡与要素板(图片不持久化);无历史返回 false。 */
-  replay(): boolean {
+  /** 当前完整快照(供持久化与切换)。 */
+  snapshot(): Snapshot {
+    return {
+      history: this.history,
+      scene: this.scene,
+      versions: this.versions,
+      currentIndex: this.currentIndex,
+    }
+  }
+
+  /** 载入一个会话快照并重绘界面(切换会话 / 登录后恢复)。 */
+  hydrate(snap: Snapshot): void {
+    this.history = Array.isArray(snap.history) ? snap.history : []
+    this.versions = Array.isArray(snap.versions) ? snap.versions : []
+    this.currentIndex = Number.isInteger(snap.currentIndex) ? snap.currentIndex : this.versions.length - 1
+    this.scene = snap.scene ?? null
+    this.ui.clear()
     for (const m of this.history) this.ui.addMessage(m.role, m.content)
+    if (this.currentIndex >= 0 && this.versions[this.currentIndex]) {
+      const v = this.versions[this.currentIndex]
+      this.ui.addImage(v.url, `第 ${this.currentIndex + 1} 张`, v.downloadUrl)
+    }
     this.ui.renderScene(this.scene)
-    return this.history.length > 0
+    this.emitVersions()
   }
 
   /** 跳到第 n 个版本(1 起;供版本条点击或语音调用)。 */
@@ -157,14 +196,9 @@ export class Conversation {
 
   /** 本地快路:命中确定性指令(新对话/跳版本/收藏/撤销)则直接执行并返回 true。 */
   private tryLocal(t: string): boolean {
-    // 元命令:从头开始
+    // 元命令:开一段全新会话(交由上层在服务端新建并切换)
     if (RESET_RE.test(t)) {
-      this.reset()
-      const msg = '好的,我们从头开始 —— 你想画点什么?'
-      this.ui.addMessage('assistant', msg)
-      this.history.push({ role: 'assistant', content: msg })
-      this.persist()
-      this.ui.speak(msg)
+      this.hooks.onNewSession()
       return true
     }
     // 以下版本操作都需已有图
@@ -277,13 +311,20 @@ export class Conversation {
     const editing = isEdit && !!this.currentImage // edit 但还没图 → 退化为全新生成
     this.ui.setPending(true, editing ? '🎨 改图中…(约十几秒)' : '🎨 生成中…(约十几秒)')
     try {
-      const r = await this.generate(prompt, editing ? (this.currentImage as string) : undefined)
+      const r = await this.generate(prompt, editing ? this.currentImageId : undefined)
       this.ui.setPending(false)
       if (r.ok) {
-        this.versions.push({ url: r.url, starred: false, scene: this.cloneScene() })
+        this.versions.push({
+          url: r.url,
+          downloadUrl: r.downloadUrl || r.url,
+          imageId: r.imageId || '',
+          starred: false,
+          scene: this.cloneScene(),
+        })
         this.currentIndex = this.versions.length - 1
-        this.ui.addImage(r.url, `第 ${this.versions.length} 张`)
+        this.ui.addImage(r.url, `第 ${this.versions.length} 张`, r.downloadUrl || r.url)
         this.emitVersions()
+        this.persist()
         this.ui.speak(`第 ${this.versions.length} 张好了`) // 渲染完成播报:用户未盯屏也知道画好了
       } else {
         this.ui.addMessage('assistant', `生成失败:${r.reason}`)
@@ -298,12 +339,12 @@ export class Conversation {
   /** 把当前指针移到 idx,展示该版本、恢复其场景图快照并刷新版本条。 */
   private setCurrent(idx: number, note: string): void {
     this.currentIndex = idx
-    const snap = this.versions[idx].scene
-    this.scene = snap ? (JSON.parse(JSON.stringify(snap)) as Scene) : null
+    const v = this.versions[idx]
+    this.scene = v.scene ? (JSON.parse(JSON.stringify(v.scene)) as Scene) : null
     this.ui.renderScene(this.scene)
     this.persist()
     this.ui.addMessage('assistant', `↩️ ${note}`)
-    this.ui.addImage(this.versions[idx].url, `第 ${idx + 1} 张`)
+    this.ui.addImage(v.url, `第 ${idx + 1} 张`, v.downloadUrl)
     this.emitVersions()
     this.ui.speak(note)
   }
@@ -315,6 +356,7 @@ export class Conversation {
     const n = this.currentIndex + 1
     this.ui.addMessage('assistant', v.starred ? `⭐ 已收藏第 ${n} 张` : `已取消收藏第 ${n} 张`)
     this.emitVersions()
+    this.persist()
     this.ui.speak(v.starred ? '已收藏' : '已取消收藏')
   }
 
@@ -327,22 +369,6 @@ export class Conversation {
         current: i === this.currentIndex,
       })),
     )
-  }
-
-  /** 清空记忆:历史、场景图、本地存储、版本、对话区全清。 */
-  private reset(): void {
-    this.history = []
-    this.versions = []
-    this.currentIndex = -1
-    this.scene = null
-    try {
-      localStorage.removeItem(STORAGE_KEY)
-    } catch {
-      /* localStorage 不可用时忽略 */
-    }
-    this.ui.clear()
-    this.ui.renderScene(null)
-    this.emitVersions()
   }
 
   private async chat(nosplit = false): Promise<ChatResp> {
@@ -359,32 +385,7 @@ export class Conversation {
     return (await resp.json()) as ChatResp
   }
 
-  // 持久化格式:{h: 对话历史, s: 场景图};兼容旧版纯数组(仅历史)
   private persist(): void {
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({ h: this.history.slice(-MAX_STORED), s: this.scene }),
-      )
-    } catch {
-      /* 容量满 / 隐私模式:静默降级为仅会话内记忆 */
-    }
-  }
-
-  private load(): { h: ChatMsg[]; s: Scene | null } {
-    const empty = { h: [] as ChatMsg[], s: null }
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY)
-      if (!raw) return empty
-      const data = JSON.parse(raw)
-      const arr = Array.isArray(data) ? data : Array.isArray(data?.h) ? data.h : []
-      const h = arr.filter(
-        (m: ChatMsg) => (m?.role === 'user' || m?.role === 'assistant') && typeof m?.content === 'string',
-      )
-      const s = !Array.isArray(data) && data?.s && Array.isArray(data.s.elements) ? (data.s as Scene) : null
-      return { h, s }
-    } catch {
-      return empty
-    }
+    this.hooks.persist(this.snapshot())
   }
 }
