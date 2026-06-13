@@ -157,6 +157,34 @@ function renderVersions(items: VersionView[]): void {
   }
 }
 
+// ---- 复合指令步骤标签:拆解结果上屏,执行中点亮、完成打勾 ----
+function addSteps(steps: string[]): (i: number, state: 'active' | 'done') => void {
+  const wrap = document.createElement('div')
+  wrap.className = 'msg assistant'
+  const box = document.createElement('div')
+  box.className = 'steps'
+  const chips = steps.map((s, i) => {
+    const chip = document.createElement('span')
+    chip.className = 'step-chip'
+    chip.textContent = `${i + 1}. ${s}`
+    box.appendChild(chip)
+    return chip
+  })
+  wrap.appendChild(box)
+  chatEl.appendChild(wrap)
+  chatEl.scrollTop = chatEl.scrollHeight
+  return (i, state) => {
+    const chip = chips[i]
+    if (!chip) return
+    if (state === 'active') chip.classList.add('active')
+    else {
+      chip.classList.remove('active')
+      chip.classList.add('done')
+      chip.textContent = `✓ ${steps[i]}`
+    }
+  }
+}
+
 // ---- 文生图 / 改图(带 image 即编辑当前图)----
 async function generate(
   prompt: string,
@@ -186,6 +214,7 @@ const conversation = new Conversation(
     addImage,
     renderVersions,
     renderScene,
+    addSteps,
   },
   generate,
 )

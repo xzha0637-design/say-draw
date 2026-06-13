@@ -205,6 +205,45 @@ body {
   border-bottom-left-radius: 5px;
 }
 
+/* 复合指令步骤标签:执行中点亮,完成打勾 */
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: min(76%, 640px);
+}
+.step-chip {
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid #d4dae1;
+  color: #51606e;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.07);
+  transition: all 0.2s;
+}
+.step-chip.active {
+  border-color: #f59e0b;
+  background: #fff7e6;
+  color: #b45309;
+  animation: step-pulse 1.2s ease-in-out infinite;
+}
+@keyframes step-pulse {
+  0%,
+  100% {
+    box-shadow: 0 1px 3px rgba(245, 158, 11, 0.25);
+  }
+  50% {
+    box-shadow: 0 1px 12px rgba(245, 158, 11, 0.6);
+  }
+}
+.step-chip.done {
+  border-color: #2b7a4b;
+  background: #eef7f1;
+  color: #2b7a4b;
+}
+
 /* 对话流里的生成图(带版本号,点击放大) */
 .img-col {
   display: inline-flex;
