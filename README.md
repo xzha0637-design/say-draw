@@ -128,11 +128,24 @@ curl -X POST http://localhost:8787/api/chat \
   -d '{"hasImage":true,"messages":[{"role":"user","content":"回到第二张,然后把背景换成星空"}]}'
 # 预期:{"ok":true,"action":"multi","reply":"…","steps":["回到第2张","把背景换成星空"]}
 
+# 登录系统与会话隔离(user_id × session_id):
+curl -X POST http://localhost:8787/api/auth/register \
+  -H 'Content-Type: application/json' -d '{"username":"alice","password":"test1234"}'
+# 预期:{"ok":true,"token":"…","userId":"…","username":"alice"}(登录用 /api/auth/login,同形)
+
+# 用 token 管理自己的会话(别人的 token 看不到 → 404):
+curl http://localhost:8787/api/conversations -H "Authorization: Bearer <上一步的token>"
+# 预期:{"ok":true,"conversations":[…]};POST 同路径 = 新建会话;GET / PUT /api/conversations/:id 读取 / 保存快照
+# 数据落盘在 backend/data/(密码 scrypt 加盐哈希,目录已 gitignore)
+
 # 画面描述 → 最终图片:
 curl -X POST http://localhost:8787/api/generate \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"卡通风格的可爱猫咪,在绿色草地上,微信头像,清新明亮"}'
-# 预期:{"ok":true,"url":"https://.../xxx"}(浏览器打开该 url 看图)
+# 匿名:{"ok":true,"url":"https://.../xxx"}(Seedream 外链,会过期)
+# 带 Authorization: Bearer <token> + sessionId 时:出图字节入库,返回持久能力 URL:
+#   {"ok":true,"url":"/api/images/<id>?k=<key>","downloadUrl":"…&dl=1","imageId":"<id>"}
+#   该 URL 长期可看;downloadUrl 触发浏览器另存(随时下载),不依赖 Seedream 外链存活
 ```
 
 > 未配置 `.env` 时接口会返回「后端未配置 ARK_API_KEY / ARK_MODEL」——属正常,填好密钥即可。
@@ -147,8 +160,8 @@ npm run preview    # 本地预览构建产物
 
 ## 依赖说明
 
-- **第三方**:前端 vite、typescript(均为构建期依赖,**运行时无第三方库**);后端 express、dotenv(详见各模块 `package.json`)。豆包对话与 Seedream 文生图经**火山方舟 OpenAI 兼容接口**调用,后端用原生 `fetch`,无需额外 SDK。
-- **原创部分**:语义画布(场景图协议、画面要素板、版本场景快照)、对话造图的会话控制器(记忆 / 持久化 / 看图态切换)、后端对话系统提示词与 `{action, reply, prompt, scene}` 归一化、由模型判断生成时机与反问策略、前端语音对话 UI、ASR↔TTS 语音打断(barge-in)与回声过滤联动、Seedream 接入与展示。
+- **第三方**:前端 vite、typescript(均为构建期依赖,**运行时无第三方库**);后端 express、dotenv、**better-sqlite3**(同步 SQLite 驱动,用于用户 / 会话 / 图片持久化;密码哈希用 Node 内置 `node:crypto`)。详见各模块 `package.json`。豆包对话与 Seedream 文生图经**火山方舟 OpenAI 兼容接口**调用,后端用原生 `fetch`,无需额外 SDK。
+- **原创部分**:语义画布(场景图协议、画面要素板、版本场景快照)、登录与隔离体系(`user_id × session_id` 数据隔离、令牌鉴权、图片字节入库与「能力 URL」下载)、对话造图的会话控制器(记忆 / 持久化 / 看图态切换)、后端对话系统提示词与 `{action, reply, prompt, scene}` 归一化、由模型判断生成时机与反问策略、前端语音对话 UI、ASR↔TTS 语音打断(barge-in)与回声过滤联动、Seedream 接入与展示。
 
 ## 目录结构
 
