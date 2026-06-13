@@ -1,9 +1,10 @@
 import './style.css'
 import { ASR } from './asr'
-import { Conversation } from './chat'
+import { Conversation, type VersionView } from './chat'
 import { TTS } from './tts'
 
 const chatEl = document.getElementById('chat') as HTMLDivElement
+const versionsEl = document.getElementById('versions') as HTMLDivElement
 const micBtn = document.getElementById('mic-btn') as HTMLButtonElement
 const statusEl = document.getElementById('status') as HTMLDivElement
 const resetBtn = document.getElementById('reset-btn') as HTMLButtonElement
@@ -57,18 +58,52 @@ function closeOverlay(): void {
 }
 resultOverlay.addEventListener('click', closeOverlay)
 
-// ---- 对话流内联图片(点击放大)----
-function addImage(url: string): void {
+// ---- 对话流内联图片(带版本号,点击放大)----
+function addImage(url: string, label?: string): void {
   const wrap = document.createElement('div')
   wrap.className = 'msg assistant'
+  const col = document.createElement('div')
+  col.className = 'img-col'
   const img = document.createElement('img')
   img.className = 'gen-img'
   img.src = url
   img.alt = '生成的图片'
   img.addEventListener('click', () => openOverlay(url))
-  wrap.appendChild(img)
+  col.appendChild(img)
+  if (label) {
+    const cap = document.createElement('div')
+    cap.className = 'img-cap'
+    cap.textContent = label
+    col.appendChild(cap)
+  }
+  wrap.appendChild(col)
   chatEl.appendChild(wrap)
   chatEl.scrollTop = chatEl.scrollHeight
+}
+
+// ---- 底部版本条(检查点总览;点击或语音「回到第N张」跳转)----
+function renderVersions(items: VersionView[]): void {
+  versionsEl.innerHTML = ''
+  versionsEl.classList.toggle('empty', items.length === 0)
+  if (items.length === 0) return
+  const title = document.createElement('span')
+  title.className = 'ver-title'
+  title.textContent = '版本'
+  versionsEl.appendChild(title)
+  for (const it of items) {
+    const thumb = document.createElement('button')
+    thumb.className = 'ver-thumb' + (it.current ? ' current' : '')
+    thumb.title = `第${it.n}张${it.starred ? ' ⭐' : ''} —— 点击或说「回到第${it.n}张」从这张继续`
+    const img = document.createElement('img')
+    img.src = it.url
+    thumb.appendChild(img)
+    const tag = document.createElement('span')
+    tag.className = 'ver-n'
+    tag.textContent = (it.starred ? '⭐' : '') + it.n
+    thumb.appendChild(tag)
+    thumb.addEventListener('click', () => conversation.jumpTo(it.n))
+    versionsEl.appendChild(thumb)
+  }
 }
 
 // ---- 文生图 / 改图(带 image 即编辑当前图)----
@@ -98,6 +133,7 @@ const conversation = new Conversation(
     },
     speak: (t) => tts.speak(t),
     addImage,
+    renderVersions,
   },
   generate,
 )

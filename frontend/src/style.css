@@ -93,13 +93,77 @@ body {
   border-bottom-left-radius: 5px;
 }
 
-/* 对话流里的生成图(点击放大) */
+/* 对话流里的生成图(带版本号,点击放大) */
+.img-col {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+}
 .gen-img {
   max-width: min(72%, 420px);
   border-radius: 14px;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
   cursor: zoom-in;
   display: block;
+}
+.img-cap {
+  font-size: 12px;
+  color: #8b97a3;
+  padding-left: 2px;
+}
+
+/* 底部版本条(检查点) */
+#versions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  overflow-x: auto;
+  background: #fff;
+  border-top: 1px solid #e6eaef;
+}
+#versions.empty {
+  display: none;
+}
+.ver-title {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: #8b97a3;
+  margin-right: 2px;
+}
+.ver-thumb {
+  position: relative;
+  flex: 0 0 auto;
+  width: 52px;
+  height: 52px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #eef1f5;
+  cursor: pointer;
+}
+.ver-thumb.current {
+  border-color: #2b7a4b;
+  box-shadow: 0 0 0 2px rgba(43, 122, 75, 0.18);
+}
+.ver-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.ver-n {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  font-size: 11px;
+  line-height: 1.4;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  padding: 0 5px;
+  border-radius: 6px;
 }
 
 /* 语音 HUD(底部) */
