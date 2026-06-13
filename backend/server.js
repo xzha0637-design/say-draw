@@ -19,10 +19,16 @@ const CHAT_SYSTEM_PROMPT = `你是「语音造图」的 AI 助手。用户只能
 - 每轮都根据全部对话把 scene 更新到最新并【完整返回】(不是增量);用户每提到一点信息就放进对应字段;未知一律留空字符串。
 - elements 最多 8 个;name 是简短名词;desc 放姿态/配饰/神态等细节;pos 只用粗方位(左侧/右侧/上方/下方/中间/背景);color/size 没提就留空。
 
-每轮只输出一个 JSON 对象,三选一(都必须带 scene):
+每轮只输出一个 JSON 对象,四选一(multi 外都必须带 scene):
 - 继续聊: {"action":"chat","reply":"…","scene":{…}}
 - 生成新图: {"action":"generate","reply":"…","prompt":"…","scene":{…}}
 - 修改当前图: {"action":"edit","reply":"…","prompt":"…","scene":{…}}
+- 复合指令拆解: {"action":"multi","reply":"…","steps":["回到第2张","把背景换成星空"]}
+
+multi 的使用规则(复杂指令拆解):
+- 仅当一句话包含【跨类型的多个动作】才拆,典型:版本/会话操作(回到第N张、撤销、收藏、新对话)与改图/生成混在一句;或明确要求先后出多张图。
+- steps 每条是可独立执行的简短中文指令(≤20字),按执行顺序排列,2~4 条;reply 极短地预告(例:"好,分两步~")。
+- 【不要拆】同属一次改图的多个改动点:"猫改白色,背景换沙滩"是一次 edit 一并完成——一次重绘更快且画面更一致。
 
 还没有图时:
 - 帮用户把画面说清楚,逐步确认四件事:① 画什么(主体/内容)② 风格(写实照片/卡通/油画/水彩/像素/线描…)③ 背景或场景 ④ 用途(头像/海报/壁纸/插画/表情…)。
@@ -36,7 +42,7 @@ const CHAT_SYSTEM_PROMPT = `你是「语音造图」的 AI 助手。用户只能
 - 用户只是夸赞/闲聊/问问题(不是要改图)→ 仍用 chat。信息太模糊不足以改 → 先 chat 问清,反问尽量给选项(如"是猫的左边还是画面的左边?")。
 
 prompt 通用要求:依据【更新后的 scene】给出完整中文画面描述,主体+风格+背景+关键细节+色调,尽量具体可成画,不要对话语气词。
-reply:会被朗读,必须很短(不超过 14 个字)、自然口语(生成例:"好,这就画~";改图例:"没问题,猫改橙色~")。
+reply:会被朗读,要短、自然口语。确认类不超过 14 字(例:"好,这就画~""没问题,猫改橙色~");反问类必须把具体问题问出口、可带选项,不超过 30 字(例:"想要什么风格?卡通还是写实?")。
 
 严格只输出一个 JSON,不要解释、不要 markdown、不要多余文字。`
 
@@ -62,13 +68,15 @@ function normalizeScene(s) {
   }
 }
 
-/** 对话式造图:把多轮消息发给豆包,强制 JSON 输出 {action, reply, prompt?, scene}。
+/** 对话式造图:把多轮消息发给豆包,强制 JSON 输出 {action, reply, prompt?, scene, steps?}。
  *  hasImage=true 时提示模型"当前已有图",引导它对修改请求用 action="edit";
- *  scene 为前端持有的当前场景图,传给模型作为更新基础。 */
-async function callDoubaoChat(messages, hasImage, scene) {
+ *  scene 为前端持有的当前场景图,传给模型作为更新基础;
+ *  nosplit=true 表示本条是已拆解出的单步指令,禁止模型再次返回 multi(防递归)。 */
+async function callDoubaoChat(messages, hasImage, scene, nosplit) {
   const state = []
   if (hasImage) state.push('画面上已经有一张生成好的图。用户接下来若要修改它,请用 action="edit"(系统会自动把当前图作为参考);只有明确要全新无关的图才用 generate。')
   if (scene) state.push(`当前场景图(请在此基础上更新并完整返回):${JSON.stringify(scene)}`)
+  if (nosplit) state.push('本条是复合指令拆解后的单步,必须直接执行(chat/generate/edit 三选一),禁止返回 multi。')
   const system = state.length ? `${CHAT_SYSTEM_PROMPT}\n\n【当前状态】\n${state.join('\n')}` : CHAT_SYSTEM_PROMPT
   const resp = await fetch(`${ARK_BASE}/chat/completions`, {
     method: 'POST',
@@ -151,9 +159,18 @@ app.post('/api/chat', async (req, res) => {
   }
   const hasImage = req.body?.hasImage === true
   const clientScene = normalizeScene(req.body?.scene)
+  const nosplit = req.body?.nosplit === true
   try {
-    const out = await callDoubaoChat(messages, hasImage, clientScene)
+    const out = await callDoubaoChat(messages, hasImage, clientScene, nosplit)
     const reply = typeof out?.reply === 'string' && out.reply.trim() ? out.reply.trim() : '嗯,你再多说说想要的画面?'
+    // 复合指令拆解:校验 steps;nosplit 时即使模型仍返回 multi 也不下发(防递归),退化为 chat
+    if (out?.action === 'multi' && !nosplit) {
+      const steps = (Array.isArray(out?.steps) ? out.steps : [])
+        .map((s) => (typeof s === 'string' ? s.trim().slice(0, 40) : ''))
+        .filter(Boolean)
+        .slice(0, 4)
+      if (steps.length >= 2) return res.json({ ok: true, action: 'multi', reply, steps })
+    }
     // 模型返回的场景图;不合法时回退为请求里的旧场景,保证前端要素板不闪没
     const scene = normalizeScene(out?.scene) || clientScene
     if (out?.action === 'generate' || out?.action === 'edit') {

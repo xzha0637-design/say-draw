@@ -43,6 +43,7 @@ export interface VersionView {
 type ChatResp =
   | { ok: true; action: 'chat'; reply: string; scene?: Scene }
   | { ok: true; action: 'generate' | 'edit'; reply: string; prompt: string; scene?: Scene }
+  | { ok: true; action: 'multi'; reply: string; steps: string[] }
   | { ok: false; reason: string }
 
 export type GenResult = { ok: true; url: string } | { ok: false; reason: string }
@@ -55,6 +56,8 @@ export interface ChatUI {
   renderVersions: (items: VersionView[]) => void
   /** 渲染画面要素板(语义画布);changed 指明本轮变更、需闪烁的部分。 */
   renderScene: (scene: Scene | null, changed?: SceneChanges) => void
+  /** 复合指令:把拆解出的步骤标签上屏,返回用于逐条点亮/打勾的更新函数。 */
+  addSteps: (steps: string[]) => (i: number, state: 'active' | 'done') => void
   clear: () => void
   setPending: (on: boolean, label?: string) => void
   speak: (text: string) => void
@@ -129,6 +132,31 @@ export class Conversation {
     const t = text.trim()
     if (!t) return
 
+    // 快路:确定性指令本地执行,~0ms
+    if (this.tryLocal(t)) return
+
+    this.ui.addMessage('user', t)
+    this.history.push({ role: 'user', content: t })
+    this.persist()
+
+    const resp = await this.requestChat()
+    if (!resp) return
+    if (!resp.ok) {
+      this.ui.addMessage('assistant', resp.reason)
+      this.ui.speak(resp.reason)
+      return
+    }
+
+    // 复合指令:慢路拆解出步骤,逐条执行(每条再分发时仍先过快路)
+    if (resp.action === 'multi') {
+      await this.runSteps(resp.reply, resp.steps)
+      return
+    }
+    await this.applyResponse(resp)
+  }
+
+  /** 本地快路:命中确定性指令(新对话/跳版本/收藏/撤销)则直接执行并返回 true。 */
+  private tryLocal(t: string): boolean {
     // 元命令:从头开始
     if (RESET_RE.test(t)) {
       this.reset()
@@ -137,61 +165,56 @@ export class Conversation {
       this.history.push({ role: 'assistant', content: msg })
       this.persist()
       this.ui.speak(msg)
-      return
+      return true
     }
-
     // 以下版本操作都需已有图
-    if (this.versions.length > 0) {
-      // 回到任意版本(随时回退)
-      const jm = t.match(JUMP_RE)
-      if (jm) {
-        const n = toIndex(jm[1])
-        if (n && n >= 1 && n <= this.versions.length) this.jumpTo(n)
-        else {
-          const msg = `现在只有 ${this.versions.length} 张哦`
-          this.ui.addMessage('assistant', msg)
-          this.ui.speak(msg)
-        }
-        return
+    if (this.versions.length === 0) return false
+    // 回到任意版本(随时回退)
+    const jm = t.match(JUMP_RE)
+    if (jm) {
+      const n = toIndex(jm[1])
+      if (n && n >= 1 && n <= this.versions.length) this.jumpTo(n)
+      else {
+        const msg = `现在只有 ${this.versions.length} 张哦`
+        this.ui.addMessage('assistant', msg)
+        this.ui.speak(msg)
       }
-      // 收藏/保存当前版本为检查点
-      if (STAR_RE.test(t)) {
-        this.toggleStar()
-        return
-      }
-      // 撤销:线性回上一张
-      if (UNDO_RE.test(t)) {
-        if (this.currentIndex > 0) this.setCurrent(this.currentIndex - 1, '已退回上一张')
-        else {
-          this.ui.addMessage('assistant', '没有更早的版本了')
-          this.ui.speak('没有更早的版本了')
-        }
-        return
-      }
+      return true
     }
+    // 收藏/保存当前版本为检查点
+    if (STAR_RE.test(t)) {
+      this.toggleStar()
+      return true
+    }
+    // 撤销:线性回上一张
+    if (UNDO_RE.test(t)) {
+      if (this.currentIndex > 0) this.setCurrent(this.currentIndex - 1, '已退回上一张')
+      else {
+        this.ui.addMessage('assistant', '没有更早的版本了')
+        this.ui.speak('没有更早的版本了')
+      }
+      return true
+    }
+    return false
+  }
 
-    this.ui.addMessage('user', t)
-    this.history.push({ role: 'user', content: t })
-    this.persist()
-
+  /** 慢路一轮:带 pending 状态请求豆包;网络失败时提示并返回 null。 */
+  private async requestChat(nosplit = false): Promise<ChatResp | null> {
     this.ui.setPending(true, '🤔 豆包思考中…')
-    let resp: ChatResp
     try {
-      resp = await this.chat()
+      const resp = await this.chat(nosplit)
+      this.ui.setPending(false)
+      return resp
     } catch {
       this.ui.setPending(false)
-      const err = '后端没连上?对话依赖后端(cd backend && npm run dev)'
-      this.ui.addMessage('assistant', err)
-      return
+      this.ui.addMessage('assistant', '后端没连上?对话依赖后端(cd backend && npm run dev)')
+      return null
     }
-    this.ui.setPending(false)
+  }
 
-    if (!resp.ok) {
-      this.ui.addMessage('assistant', resp.reason)
-      this.ui.speak(resp.reason)
-      return
-    }
-
+  /** 单动作响应落地:场景图 → 气泡 → 记忆 → 朗读 → 触发出图。 */
+  private async applyResponse(resp: Extract<ChatResp, { ok: true }>): Promise<void> {
+    if (resp.action === 'multi') return // 防御:nosplit 下后端已兜底为 chat,不应到这
     if (resp.scene) this.applyScene(resp.scene)
     this.ui.addMessage('assistant', resp.reply)
     this.history.push({ role: 'assistant', content: resp.reply })
@@ -200,6 +223,28 @@ export class Conversation {
 
     if (resp.action === 'generate') await this.runGenerate(resp.prompt, false)
     else if (resp.action === 'edit') await this.runGenerate(resp.prompt, true)
+  }
+
+  /** 复合指令执行器:步骤标签上屏,按序执行;每条步骤先过本地快路,需要时再走豆包(nosplit)。 */
+  private async runSteps(reply: string, steps: string[]): Promise<void> {
+    this.history.push({ role: 'assistant', content: reply })
+    this.persist()
+    const mark = this.ui.addSteps(steps)
+    this.ui.speak(reply)
+    for (let i = 0; i < steps.length; i++) {
+      mark(i, 'active')
+      if (!this.tryLocal(steps[i])) {
+        // 步骤入记忆但不入气泡(步骤标签已可见),模型按单步指令直接执行
+        this.history.push({ role: 'user', content: steps[i] })
+        const r = await this.requestChat(true)
+        if (r && r.ok) await this.applyResponse(r)
+        else if (r && !r.ok) {
+          this.ui.addMessage('assistant', r.reason)
+          this.ui.speak(r.reason)
+        }
+      }
+      mark(i, 'done')
+    }
   }
 
   /** 应用模型返回的新场景图:与旧场景做 diff,变更部分在要素板上闪烁。 */
@@ -239,6 +284,7 @@ export class Conversation {
         this.currentIndex = this.versions.length - 1
         this.ui.addImage(r.url, `第 ${this.versions.length} 张`)
         this.emitVersions()
+        this.ui.speak(`第 ${this.versions.length} 张好了`) // 渲染完成播报:用户未盯屏也知道画好了
       } else {
         this.ui.addMessage('assistant', `生成失败:${r.reason}`)
         this.ui.speak('生成失败了')
@@ -299,7 +345,7 @@ export class Conversation {
     this.emitVersions()
   }
 
-  private async chat(): Promise<ChatResp> {
+  private async chat(nosplit = false): Promise<ChatResp> {
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -307,6 +353,7 @@ export class Conversation {
         messages: this.history.slice(-MAX_SENT),
         hasImage: !!this.currentImage,
         scene: this.scene,
+        nosplit,
       }),
     })
     return (await resp.json()) as ChatResp
