@@ -1,9 +1,10 @@
 import './style.css'
 import { ASR } from './asr'
-import { Conversation, type VersionView } from './chat'
+import { Conversation, type Scene, type SceneChanges, type VersionView } from './chat'
 import { TTS } from './tts'
 
 const chatEl = document.getElementById('chat') as HTMLDivElement
+const sceneEl = document.getElementById('scene') as HTMLElement
 const versionsEl = document.getElementById('versions') as HTMLDivElement
 const micBtn = document.getElementById('mic-btn') as HTMLButtonElement
 const statusEl = document.getElementById('status') as HTMLDivElement
@@ -40,10 +41,60 @@ function setStatus(text: string, kind: 'idle' | 'interim' | 'pending'): void {
   else statusEl.textContent = text
 }
 function idleStatus(): void {
-  setStatus(
-    asr.listening ? '🎧 在听… 说你想画什么、或怎么改' : '点击下方按钮并允许麦克风,说说你想画什么…',
-    'idle',
-  )
+  // 语音界面没有按钮可看,按状态动态提示"现在可以说什么"
+  const tip = conversation.hasVersions
+    ? '试试:「把猫改成白色」「回到第 1 张」「收藏」'
+    : '例:「画一只戴围巾的橙色小猫」'
+  setStatus(asr.listening ? `🎧 在听… ${tip}` : '点击下方按钮并允许麦克风,说说你想画什么…', 'idle')
+}
+
+// ---- 画面要素板(语义画布的可视化:风格/背景/用途 + 元素卡片,变更闪烁)----
+const META_LABEL = { style: '风格', background: '背景', usage: '用途' } as const
+const COLOR_CSS: [RegExp, string][] = [
+  [/红/, '#e74c3c'], [/橙|橘/, '#f59e0b'], [/黄|金/, '#f1c40f'], [/绿/, '#2ecc71'],
+  [/青/, '#1abc9c'], [/蓝/, '#3498db'], [/紫/, '#9b59b6'], [/粉/, '#fd79a8'],
+  [/黑/, '#2d3436'], [/白|银/, '#f5f6fa'], [/灰/, '#95a5a6'], [/棕|咖啡/, '#8d6e63'],
+]
+function colorCss(word: string): string | null {
+  for (const [re, css] of COLOR_CSS) if (re.test(word)) return css
+  return null
+}
+
+function renderScene(scene: Scene | null, changed?: SceneChanges): void {
+  sceneEl.innerHTML = ''
+  const head = document.createElement('div')
+  head.className = 'scene-head'
+  head.textContent = '🎬 画面要素'
+  sceneEl.appendChild(head)
+  if (!scene || (!scene.style && !scene.usage && !scene.background && scene.elements.length === 0)) {
+    const tip = document.createElement('div')
+    tip.className = 'scene-tip'
+    tip.textContent = '聊着聊着,这里会拼出你要的画面 —— AI 听懂了什么、还缺什么,一目了然。'
+    sceneEl.appendChild(tip)
+    return
+  }
+  for (const k of ['style', 'background', 'usage'] as const) {
+    const row = document.createElement('div')
+    row.className = 'scene-meta' + (changed?.metas.includes(k) ? ' flash' : '')
+    const v = scene[k]
+    row.innerHTML =
+      `<span class="k">${META_LABEL[k]}</span>` +
+      `<span class="v${v ? '' : ' unset'}">${escapeHtml(v || '待定')}</span>`
+    sceneEl.appendChild(row)
+  }
+  scene.elements.forEach((el, i) => {
+    const card = document.createElement('div')
+    card.className = 'scene-card' + (changed?.names.includes(el.name) ? ' flash' : '')
+    const dot = colorCss(el.color)
+    const detail = [el.color, el.desc, el.pos, el.size].filter(Boolean).join(' · ')
+    card.innerHTML =
+      `<div class="el-head"><span class="el-n">${i + 1}</span>` +
+      `<span class="el-name">${escapeHtml(el.name)}</span>` +
+      (dot ? `<span class="el-dot" style="background:${dot}"></span>` : '') +
+      `</div>` +
+      (detail ? `<div class="el-info">${escapeHtml(detail)}</div>` : '')
+    sceneEl.appendChild(card)
+  })
 }
 
 // ---- 放大查看覆盖层 ----
@@ -134,6 +185,7 @@ const conversation = new Conversation(
     speak: (t) => tts.speak(t),
     addImage,
     renderVersions,
+    renderScene,
   },
   generate,
 )
