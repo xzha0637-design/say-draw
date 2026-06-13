@@ -48,6 +48,7 @@ function getCtor(): SpeechRecognitionCtor | null {
 export class ASR {
   private recognition: SpeechRecognitionLike | null = null
   private wantListening = false
+  private spawnedAt = 0
   private readonly cb: ASRCallbacks
 
   constructor(cb: ASRCallbacks = {}) {
@@ -103,22 +104,35 @@ export class ASR {
     }
 
     rec.onerror = (e) => {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        // 权限被拒:先归位聆听状态,再给可操作提示——顺序很重要,
+        // 反过来的话 onListeningChange 触发的默认文案会立刻覆盖错误提示,用户只见按钮弹回、不见原因
+        this.wantListening = false
+        this.cb.onListeningChange?.(false)
+        this.cb.onError?.('麦克风权限被拒绝:点击地址栏左侧 🔒/ⓘ → 麦克风 → 允许,然后重试')
+        return
+      }
       // no-speech / aborted 属正常静默;其余上报
       if (e.error !== 'no-speech' && e.error !== 'aborted') {
         this.cb.onError?.(`语音识别错误:${e.error}`)
       }
-      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-        this.wantListening = false
-        this.cb.onListeningChange?.(false)
-      }
     }
 
     rec.onend = () => {
-      // 浏览器静音后会自动结束;只要仍想聆听就重启,实现持续聆听
-      if (this.wantListening) this.spawn(Ctor)
+      if (!this.wantListening) return
+      // 浏览器静音后会自动结束,立即重启实现持续聆听;
+      // 但若距启动过近(快速失败,如 network 错误)则退避重启,避免死循环刷错
+      if (Date.now() - this.spawnedAt < 1000) {
+        window.setTimeout(() => {
+          if (this.wantListening) this.spawn(Ctor)
+        }, 800)
+      } else {
+        this.spawn(Ctor)
+      }
     }
 
     this.recognition = rec
+    this.spawnedAt = Date.now()
     try {
       rec.start()
     } catch {
