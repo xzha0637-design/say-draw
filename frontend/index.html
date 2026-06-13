@@ -8,7 +8,13 @@
   <body>
     <div id="app">
       <header id="topbar">
-        <span class="brand">🎙️ 语音造图</span>
+        <div class="brand">
+          <span class="brand-badge">🎙️</span>
+          <span class="brand-text">
+            <span class="brand-name">语音造图</span>
+            <span class="brand-tag">说出来,就成画</span>
+          </span>
+        </div>
         <div class="top-actions">
           <span id="user-tag" class="user-tag"></span>
           <button id="myworks-btn" type="button" title="我的作品(历史会话)">🗂️ 我的画</button>
@@ -29,7 +35,9 @@
       <!-- 语音 HUD:麦克风按钮 + 识别字幕 / 状态 -->
       <div id="hud">
         <div id="status" class="empty">点击下方按钮并允许麦克风,说说你想画什么…</div>
-        <button id="mic-btn" type="button">🎤 开始聆听</button>
+        <div class="mic-wrap">
+          <button id="mic-btn" type="button">🎤 开始聆听</button>
+        </div>
       </div>
     </div>
 
@@ -53,6 +61,10 @@
     <!-- 登录 / 注册覆盖层 -->
     <div id="auth-overlay">
       <form id="auth-form" class="auth-card">
+        <div class="auth-brand">
+          <span class="brand-badge">🎙️</span>
+          <span class="auth-brand-name">语音造图</span>
+        </div>
         <div id="auth-title" class="auth-title">登录</div>
         <div class="auth-sub">语音造图 · 你的作品按账号隔离、自动保存、随时下载</div>
         <input id="auth-user" type="text" autocomplete="username" placeholder="用户名(2~20 位)" />
