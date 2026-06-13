@@ -10,13 +10,19 @@ const ARK_THINKING = process.env.ARK_THINKING
 // Seedream 文生图模型;需在方舟「开通管理」开通对应模型,模型 ID 填这里
 const ARK_IMAGE_MODEL = process.env.ARK_IMAGE_MODEL
 
-// 对话式造图的系统提示:多轮聊清画面 → 满意后触发生成
-const CHAT_SYSTEM_PROMPT = `你是「语音造图」的 AI 助手。用户只能用语音和你交流,你们先把"想要的画面"聊清楚并生成,之后还能用语音不断修改这张图,直到满意。
+// 对话式造图的系统提示:多轮聊清画面 → 满意后触发生成。
+// 语义画布:模型每轮同时维护并完整返回结构化场景图 scene,前端据此渲染「画面要素板」。
+const CHAT_SYSTEM_PROMPT = `你是「语音造图」的 AI 助手。用户只能用语音和你交流;输入来自语音识别,可能有同音错字(如"橙色"被识别成"成色"),按发音与上下文就近纠正理解,不要纠结错字。你们先把"想要的画面"聊清楚并生成,之后还能用语音不断修改这张图,直到满意。
 
-每轮只输出一个 JSON 对象,三选一:
-- 继续聊: {"action":"chat","reply":"…"}
-- 生成新图: {"action":"generate","reply":"…","prompt":"…"}
-- 修改当前图: {"action":"edit","reply":"…","prompt":"…"}
+你同时维护一份【场景图 scene】——当前画面的结构化描述,字段全为字符串:
+{"style":"风格","usage":"用途","background":"背景","elements":[{"name":"猫","color":"橙色","desc":"坐姿,戴红围巾","pos":"左侧","size":"大"}]}
+- 每轮都根据全部对话把 scene 更新到最新并【完整返回】(不是增量);用户每提到一点信息就放进对应字段;未知一律留空字符串。
+- elements 最多 8 个;name 是简短名词;desc 放姿态/配饰/神态等细节;pos 只用粗方位(左侧/右侧/上方/下方/中间/背景);color/size 没提就留空。
+
+每轮只输出一个 JSON 对象,三选一(都必须带 scene):
+- 继续聊: {"action":"chat","reply":"…","scene":{…}}
+- 生成新图: {"action":"generate","reply":"…","prompt":"…","scene":{…}}
+- 修改当前图: {"action":"edit","reply":"…","prompt":"…","scene":{…}}
 
 还没有图时:
 - 帮用户把画面说清楚,逐步确认四件事:① 画什么(主体/内容)② 风格(写实照片/卡通/油画/水彩/像素/线描…)③ 背景或场景 ④ 用途(头像/海报/壁纸/插画/表情…)。
@@ -24,22 +30,46 @@ const CHAT_SYSTEM_PROMPT = `你是「语音造图」的 AI 助手。用户只能
 - 够清楚且用户让你开始("可以了""生成吧""开始画"等)→ 输出 generate。
 
 已经有一张图时(系统会提示"当前已有图"):
-- 用户要改它(改颜色/换背景/增减元素/调整大小或位置/换风格等)→ 用 edit。系统会自动把当前图作为参考传给生图模型,你不用管图怎么传。
+- 用户要改它(改颜色/换背景/增减元素/调整大小或位置/换风格等)→ 用 edit,并把 scene 同步改到位。系统会自动把当前图作为参考传给生图模型,你不用管图怎么传。
 - edit 的 prompt 要写清"改动后的画面",用"保留X不变,把Y改成Z"或"在…增加…,其余保持不变"这种描述,确保只动该动的、其余维持一致。
 - 只有用户明确想要"一张全新、与当前无关的图"时才用 generate。
-- 用户只是夸赞/闲聊/问问题(不是要改图)→ 仍用 chat。信息太模糊不足以改 → 先 chat 问清。
+- 用户只是夸赞/闲聊/问问题(不是要改图)→ 仍用 chat。信息太模糊不足以改 → 先 chat 问清,反问尽量给选项(如"是猫的左边还是画面的左边?")。
 
-prompt 通用要求:综合多轮对话给出【完整中文描述】,主体+风格+背景+关键细节+色调,尽量具体可成画,不要对话语气词。
-reply:会被朗读,要短、自然、像真人(生成例:"好嘞这就给你生成~";改图例:"没问题,把猫改成橙色~")。
+prompt 通用要求:依据【更新后的 scene】给出完整中文画面描述,主体+风格+背景+关键细节+色调,尽量具体可成画,不要对话语气词。
+reply:会被朗读,必须很短(不超过 14 个字)、自然口语(生成例:"好,这就画~";改图例:"没问题,猫改橙色~")。
 
 严格只输出一个 JSON,不要解释、不要 markdown、不要多余文字。`
 
-/** 对话式造图:把多轮消息发给豆包,强制 JSON 输出 {action, reply, prompt?}。
- *  hasImage=true 时提示模型"当前已有图",引导它对修改请求用 action="edit"。 */
-async function callDoubaoChat(messages, hasImage) {
-  const system = hasImage
-    ? `${CHAT_SYSTEM_PROMPT}\n\n【当前状态:画面上已经有一张生成好的图。用户接下来若要修改它,请用 action="edit"(系统会自动把当前图作为参考);只有明确要全新无关的图才用 generate。】`
-    : CHAT_SYSTEM_PROMPT
+/** 校验/归一化模型或前端传来的场景图;不合法返回 null。 */
+function normalizeScene(s) {
+  if (!s || typeof s !== 'object' || Array.isArray(s)) return null
+  const str = (v, max = 60) => (typeof v === 'string' ? v.trim().slice(0, max) : '')
+  const els = Array.isArray(s.elements) ? s.elements : []
+  return {
+    style: str(s.style),
+    usage: str(s.usage),
+    background: str(s.background),
+    elements: els
+      .slice(0, 8)
+      .map((e) => ({
+        name: str(e?.name, 20),
+        color: str(e?.color, 20),
+        desc: str(e?.desc),
+        pos: str(e?.pos, 20),
+        size: str(e?.size, 20),
+      }))
+      .filter((e) => e.name),
+  }
+}
+
+/** 对话式造图:把多轮消息发给豆包,强制 JSON 输出 {action, reply, prompt?, scene}。
+ *  hasImage=true 时提示模型"当前已有图",引导它对修改请求用 action="edit";
+ *  scene 为前端持有的当前场景图,传给模型作为更新基础。 */
+async function callDoubaoChat(messages, hasImage, scene) {
+  const state = []
+  if (hasImage) state.push('画面上已经有一张生成好的图。用户接下来若要修改它,请用 action="edit"(系统会自动把当前图作为参考);只有明确要全新无关的图才用 generate。')
+  if (scene) state.push(`当前场景图(请在此基础上更新并完整返回):${JSON.stringify(scene)}`)
+  const system = state.length ? `${CHAT_SYSTEM_PROMPT}\n\n【当前状态】\n${state.join('\n')}` : CHAT_SYSTEM_PROMPT
   const resp = await fetch(`${ARK_BASE}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -51,7 +81,7 @@ async function callDoubaoChat(messages, hasImage) {
       messages: [{ role: 'system', content: system }, ...messages],
       response_format: { type: 'json_object' },
       temperature: 0.6, // 对话比解析更需要自然,略升温
-      max_tokens: 1200,
+      max_tokens: 1600, // scene 随每轮完整返回,额度比纯对话略放宽
       ...(ARK_THINKING ? { thinking: { type: ARK_THINKING } } : {}),
     }),
   })
@@ -120,14 +150,17 @@ app.post('/api/chat', async (req, res) => {
     return res.status(500).json({ ok: false, reason: '后端未配置 ARK_API_KEY / ARK_MODEL(见 backend/.env.example)' })
   }
   const hasImage = req.body?.hasImage === true
+  const clientScene = normalizeScene(req.body?.scene)
   try {
-    const out = await callDoubaoChat(messages, hasImage)
+    const out = await callDoubaoChat(messages, hasImage, clientScene)
     const reply = typeof out?.reply === 'string' && out.reply.trim() ? out.reply.trim() : '嗯,你再多说说想要的画面?'
+    // 模型返回的场景图;不合法时回退为请求里的旧场景,保证前端要素板不闪没
+    const scene = normalizeScene(out?.scene) || clientScene
     if (out?.action === 'generate' || out?.action === 'edit') {
       const prompt = typeof out?.prompt === 'string' ? out.prompt.trim() : ''
-      if (prompt) return res.json({ ok: true, action: out.action, reply, prompt })
+      if (prompt) return res.json({ ok: true, action: out.action, reply, prompt, ...(scene ? { scene } : {}) })
     }
-    res.json({ ok: true, action: 'chat', reply })
+    res.json({ ok: true, action: 'chat', reply, ...(scene ? { scene } : {}) })
   } catch (e) {
     console.error('[chat] 豆包调用失败:', e?.message || e)
     res.status(502).json({ ok: false, reason: '对话失败,请重试' })
