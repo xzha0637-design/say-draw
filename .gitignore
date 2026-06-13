@@ -10,6 +10,9 @@ build/
 .env.*
 !.env.example
 
+# 后端本地数据(用户/令牌/会话,含密码哈希,不入库)
+backend/data/
+
 # logs
 *.log
 npm-debug.log*

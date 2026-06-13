@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import express from 'express'
+import * as store from './store.js'
 
 const PORT = process.env.PORT || 8787
 const ARK_BASE = process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3'
@@ -134,10 +135,111 @@ async function callSeedream(prompt, image) {
 }
 
 const app = express()
-app.use(express.json())
+app.use(express.json({ limit: '512kb' })) // 会话快照含多版本场景图,放宽默认 100kb
 
 // 健康检查
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
+
+// ───────────────── 登录与会话隔离(user_id × session_id) ─────────────────
+
+// 注册 / 登录:成功都返回 { token, userId, username },前端持 token 调会话接口
+app.post('/api/auth/register', (req, res) => {
+  const username = (req.body?.username ?? '').toString().trim()
+  const password = (req.body?.password ?? '').toString()
+  if (!/^[\w一-龥]{2,20}$/.test(username)) {
+    return res.status(400).json({ ok: false, reason: '用户名需 2~20 位(中英文/数字/下划线)' })
+  }
+  if (password.length < 4) {
+    return res.status(400).json({ ok: false, reason: '密码至少 4 位' })
+  }
+  const r = store.register(username, password)
+  if (!r.ok) return res.status(400).json(r)
+  res.json(r)
+})
+
+app.post('/api/auth/login', (req, res) => {
+  const username = (req.body?.username ?? '').toString().trim()
+  const password = (req.body?.password ?? '').toString()
+  const r = store.login(username, password)
+  if (!r.ok) return res.status(401).json(r)
+  res.json(r)
+})
+
+// 鉴权中间件:Bearer token → req.userId;之后的数据读写天然按用户隔离
+function requireAuth(req, res, next) {
+  const m = /^Bearer\s+(\S+)$/.exec(req.headers.authorization || '')
+  const t = m && store.auth(m[1])
+  if (!t) return res.status(401).json({ ok: false, reason: '未登录或登录已失效' })
+  req.userId = t.userId
+  next()
+}
+
+// 软鉴权:有有效令牌则置 req.userId,否则放行(req.userId 为空)。
+// 给 /api/generate 用——登录用户的图入库归档,匿名访客退化为旧版纯代理,保证主分支始终可运行。
+function optionalAuth(req, _res, next) {
+  const m = /^Bearer\s+(\S+)$/.exec(req.headers.authorization || '')
+  const t = m && store.auth(m[1])
+  if (t) req.userId = t.userId
+  next()
+}
+
+/** 会话快照入库前的归一化:形状校验 + 数量/长度上限,坏数据不落盘。 */
+function normalizeSnapshot(body) {
+  const history = (Array.isArray(body?.history) ? body.history : [])
+    .filter(
+      (m) =>
+        (m?.role === 'user' || m?.role === 'assistant') &&
+        typeof m?.content === 'string' &&
+        m.content.trim(),
+    )
+    .slice(-200)
+    .map((m) => ({ role: m.role, content: m.content.slice(0, 2000) }))
+  const versions = (Array.isArray(body?.versions) ? body.versions : [])
+    .slice(0, 50)
+    .map((v) => ({
+      url: typeof v?.url === 'string' ? v.url.slice(0, 2048) : '',
+      downloadUrl: typeof v?.downloadUrl === 'string' ? v.downloadUrl.slice(0, 2048) : '',
+      imageId: typeof v?.imageId === 'string' ? v.imageId.slice(0, 64) : '',
+      starred: v?.starred === true,
+      scene: normalizeScene(v?.scene),
+    }))
+    .filter((v) => v.url)
+  const idx = Number.isInteger(body?.currentIndex) ? body.currentIndex : -1
+  return {
+    history,
+    scene: normalizeScene(body?.scene),
+    versions,
+    currentIndex: idx >= -1 && idx < versions.length ? idx : versions.length - 1,
+  }
+}
+
+// 会话 CRUD:列表 / 新建 / 读取 / 保存(前端每轮自动保存)
+app.get('/api/conversations', requireAuth, (req, res) => {
+  res.json({ ok: true, conversations: store.listConversations(req.userId) })
+})
+
+app.post('/api/conversations', requireAuth, (req, res) => {
+  res.json({ ok: true, conversation: store.createConversation(req.userId) })
+})
+
+app.get('/api/conversations/:id', requireAuth, (req, res) => {
+  const conv = store.getConversation(req.userId, req.params.id)
+  if (!conv) return res.status(404).json({ ok: false, reason: '会话不存在' })
+  res.json({ ok: true, conversation: conv })
+})
+
+app.put('/api/conversations/:id', requireAuth, (req, res) => {
+  const conv = store.saveConversation(req.userId, req.params.id, normalizeSnapshot(req.body))
+  if (!conv) return res.status(404).json({ ok: false, reason: '会话不存在' })
+  res.json({ ok: true, updatedAt: conv.updatedAt, title: conv.title })
+})
+
+app.delete('/api/conversations/:id', requireAuth, (req, res) => {
+  if (!store.deleteConversation(req.userId, req.params.id)) {
+    return res.status(404).json({ ok: false, reason: '会话不存在' })
+  }
+  res.json({ ok: true })
+})
 
 // 多轮对话造图:语音文本会话 → 豆包(继续聊 or 触发生成)
 app.post('/api/chat', async (req, res) => {
@@ -184,23 +286,69 @@ app.post('/api/chat', async (req, res) => {
   }
 })
 
-// 画面描述 → 图片(Seedream);prompt 由对话产出。带 image 则为「编辑当前图」,否则全新生成
-app.post('/api/generate', async (req, res) => {
+/** 下载 Seedream 外链字节,用于入库归档。失败返回 null(降级:仍可用外链显示)。 */
+async function fetchImageBytes(url) {
+  try {
+    const r = await fetch(url)
+    if (!r.ok) return null
+    const buf = Buffer.from(await r.arrayBuffer())
+    const mime = r.headers.get('content-type') || 'image/jpeg'
+    return { buf, mime: mime.split(';')[0].trim() }
+  } catch {
+    return null
+  }
+}
+
+// 画面描述 → 图片(Seedream)。登录用户:出图字节入库,返回持久「能力 URL」+ 下载链接;
+// 匿名访客:退化为直接返回 Seedream 外链(旧行为,保证主分支随时可运行)。
+// 改图:登录态用 imageId 取回原始外链作参考图;匿名态用 image(外链)作参考。
+app.post('/api/generate', optionalAuth, async (req, res) => {
   const prompt = (req.body?.prompt ?? '').toString().trim()
-  const image = typeof req.body?.image === 'string' && req.body.image.trim() ? req.body.image.trim() : null
+  const legacyRef = typeof req.body?.image === 'string' && req.body.image.trim() ? req.body.image.trim() : null
+  const refImageId = typeof req.body?.imageId === 'string' ? req.body.imageId.trim() : ''
+  const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : null
   if (!prompt) {
     return res.status(400).json({ ok: false, reason: '缺少 prompt' })
   }
   if (!ARK_KEY || !ARK_IMAGE_MODEL) {
     return res.status(500).json({ ok: false, reason: '后端未配置 ARK_API_KEY / ARK_IMAGE_MODEL(见 backend/.env.example)' })
   }
+  // 参考图(改图模式):登录态优先按 imageId 取归属校验过的原始外链
+  let ref = legacyRef
+  if (req.userId && refImageId) ref = store.getImageSource(req.userId, refImageId) || legacyRef
   try {
-    const url = await callSeedream(prompt, image)
-    res.json({ ok: true, url })
+    const seedreamUrl = await callSeedream(prompt, ref)
+    if (!req.userId) return res.json({ ok: true, url: seedreamUrl }) // 匿名:旧行为
+    const img = await fetchImageBytes(seedreamUrl)
+    if (!img) return res.json({ ok: true, url: seedreamUrl }) // 入库失败:降级用外链,不阻断出图
+    const { id, accessKey } = store.saveImage({
+      userId: req.userId,
+      sessionId,
+      bytes: img.buf,
+      mime: img.mime,
+      sourceUrl: seedreamUrl,
+      prompt,
+    })
+    const base = `/api/images/${id}?k=${accessKey}`
+    res.json({ ok: true, url: base, downloadUrl: `${base}&dl=1`, imageId: id })
   } catch (e) {
     console.error('[generate] Seedream 调用失败:', e?.message || e)
     res.status(502).json({ ok: false, reason: `生图失败:${e?.message || '请重试'}` })
   }
+})
+
+// 出图 / 下载入库图片。能力 URL:凭 access_key(k)即可读,无需登录头——便于 <img src> 与下载链接直用。
+// dl=1 触发浏览器另存(Content-Disposition: attachment)。
+app.get('/api/images/:id', (req, res) => {
+  const img = store.getImageForServe(req.params.id, (req.query.k ?? '').toString())
+  if (!img) return res.status(404).json({ ok: false, reason: '图片不存在或无权访问' })
+  res.setHeader('Content-Type', img.mime)
+  res.setHeader('Cache-Control', 'private, max-age=31536000')
+  if (req.query.dl) {
+    const ext = img.mime.includes('png') ? 'png' : 'jpg'
+    res.setHeader('Content-Disposition', `attachment; filename="saydraw-${req.params.id.slice(0, 8)}.${ext}"`)
+  }
+  res.end(img.bytes)
 })
 
 app.listen(PORT, () => {
