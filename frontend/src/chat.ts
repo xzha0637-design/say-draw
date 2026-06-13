@@ -12,6 +12,26 @@ export interface ChatMsg {
   content: string
 }
 
+/** 语义画布:当前画面的结构化场景图,模型每轮维护并完整返回,前端渲染为「画面要素板」。 */
+export interface SceneElement {
+  name: string
+  color: string
+  desc: string
+  pos: string
+  size: string
+}
+export interface Scene {
+  style: string
+  usage: string
+  background: string
+  elements: SceneElement[]
+}
+/** 一轮更新后,要素板需要闪烁提示的变更部分。 */
+export interface SceneChanges {
+  metas: ('style' | 'usage' | 'background')[]
+  names: string[]
+}
+
 /** 版本条要展示的一项。 */
 export interface VersionView {
   url: string
@@ -21,8 +41,8 @@ export interface VersionView {
 }
 
 type ChatResp =
-  | { ok: true; action: 'chat'; reply: string }
-  | { ok: true; action: 'generate' | 'edit'; reply: string; prompt: string }
+  | { ok: true; action: 'chat'; reply: string; scene?: Scene }
+  | { ok: true; action: 'generate' | 'edit'; reply: string; prompt: string; scene?: Scene }
   | { ok: false; reason: string }
 
 export type GenResult = { ok: true; url: string } | { ok: false; reason: string }
@@ -33,6 +53,8 @@ export interface ChatUI {
   addImage: (url: string, label?: string) => void
   /** 渲染底部版本条(检查点总览)。 */
   renderVersions: (items: VersionView[]) => void
+  /** 渲染画面要素板(语义画布);changed 指明本轮变更、需闪烁的部分。 */
+  renderScene: (scene: Scene | null, changed?: SceneChanges) => void
   clear: () => void
   setPending: (on: boolean, label?: string) => void
   speak: (text: string) => void
@@ -41,6 +63,8 @@ export interface ChatUI {
 interface ImgVersion {
   url: string
   starred: boolean
+  /** 该版本出图时的场景图快照;跳回该版本时一并恢复(存 spec 而非仅位图)。 */
+  scene: Scene | null
 }
 
 const STORAGE_KEY = 'saydraw-chat-history'
@@ -67,23 +91,32 @@ export class Conversation {
   private history: ChatMsg[] = []
   private versions: ImgVersion[] = []
   private currentIndex = -1
+  /** 语义画布:当前场景图(随对话由模型维护,版本跳转时随快照恢复)。 */
+  private scene: Scene | null = null
 
   constructor(
     private readonly ui: ChatUI,
     private readonly generate: (prompt: string, image?: string) => Promise<GenResult>,
   ) {
-    this.history = this.load()
+    const saved = this.load()
+    this.history = saved.h
+    this.scene = saved.s
   }
 
   private get currentImage(): string | null {
     return this.currentIndex >= 0 ? this.versions[this.currentIndex].url : null
   }
 
-  /** 重放历史文字气泡(图片不持久化);无历史返回 false。 */
+  /** 是否已有出图版本(供界面按状态给"你可以说…"提示)。 */
+  get hasVersions(): boolean {
+    return this.versions.length > 0
+  }
+
+  /** 重放历史文字气泡与要素板(图片不持久化);无历史返回 false。 */
   replay(): boolean {
-    if (this.history.length === 0) return false
     for (const m of this.history) this.ui.addMessage(m.role, m.content)
-    return true
+    this.ui.renderScene(this.scene)
+    return this.history.length > 0
   }
 
   /** 跳到第 n 个版本(1 起;供版本条点击或语音调用)。 */
@@ -159,6 +192,7 @@ export class Conversation {
       return
     }
 
+    if (resp.scene) this.applyScene(resp.scene)
     this.ui.addMessage('assistant', resp.reply)
     this.history.push({ role: 'assistant', content: resp.reply })
     this.persist()
@@ -166,6 +200,31 @@ export class Conversation {
 
     if (resp.action === 'generate') await this.runGenerate(resp.prompt, false)
     else if (resp.action === 'edit') await this.runGenerate(resp.prompt, true)
+  }
+
+  /** 应用模型返回的新场景图:与旧场景做 diff,变更部分在要素板上闪烁。 */
+  private applyScene(next: Scene): void {
+    const prev = this.scene
+    const changed: SceneChanges = { metas: [], names: [] }
+    const METAS = ['style', 'usage', 'background'] as const
+    if (prev) {
+      for (const k of METAS) if (next[k] && next[k] !== prev[k]) changed.metas.push(k)
+      const before = new Map(prev.elements.map((e) => [e.name, e]))
+      for (const e of next.elements) {
+        const p = before.get(e.name)
+        if (!p || p.color !== e.color || p.desc !== e.desc || p.pos !== e.pos || p.size !== e.size)
+          changed.names.push(e.name)
+      }
+    } else {
+      for (const k of METAS) if (next[k]) changed.metas.push(k)
+      changed.names = next.elements.map((e) => e.name)
+    }
+    this.scene = next
+    this.ui.renderScene(next, changed)
+  }
+
+  private cloneScene(): Scene | null {
+    return this.scene ? (JSON.parse(JSON.stringify(this.scene)) as Scene) : null
   }
 
   /** 生成(全新)或编辑(以当前版本为参考);成功则追加一个新版本检查点。 */
@@ -176,7 +235,7 @@ export class Conversation {
       const r = await this.generate(prompt, editing ? (this.currentImage as string) : undefined)
       this.ui.setPending(false)
       if (r.ok) {
-        this.versions.push({ url: r.url, starred: false })
+        this.versions.push({ url: r.url, starred: false, scene: this.cloneScene() })
         this.currentIndex = this.versions.length - 1
         this.ui.addImage(r.url, `第 ${this.versions.length} 张`)
         this.emitVersions()
@@ -190,9 +249,13 @@ export class Conversation {
     }
   }
 
-  /** 把当前指针移到 idx,展示该版本并刷新版本条。 */
+  /** 把当前指针移到 idx,展示该版本、恢复其场景图快照并刷新版本条。 */
   private setCurrent(idx: number, note: string): void {
     this.currentIndex = idx
+    const snap = this.versions[idx].scene
+    this.scene = snap ? (JSON.parse(JSON.stringify(snap)) as Scene) : null
+    this.ui.renderScene(this.scene)
+    this.persist()
     this.ui.addMessage('assistant', `↩️ ${note}`)
     this.ui.addImage(this.versions[idx].url, `第 ${idx + 1} 张`)
     this.emitVersions()
@@ -220,17 +283,19 @@ export class Conversation {
     )
   }
 
-  /** 清空记忆:历史、本地存储、版本、对话区全清。 */
+  /** 清空记忆:历史、场景图、本地存储、版本、对话区全清。 */
   private reset(): void {
     this.history = []
     this.versions = []
     this.currentIndex = -1
+    this.scene = null
     try {
       localStorage.removeItem(STORAGE_KEY)
     } catch {
       /* localStorage 不可用时忽略 */
     }
     this.ui.clear()
+    this.ui.renderScene(null)
     this.emitVersions()
   }
 
@@ -238,30 +303,41 @@ export class Conversation {
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: this.history.slice(-MAX_SENT), hasImage: !!this.currentImage }),
+      body: JSON.stringify({
+        messages: this.history.slice(-MAX_SENT),
+        hasImage: !!this.currentImage,
+        scene: this.scene,
+      }),
     })
     return (await resp.json()) as ChatResp
   }
 
+  // 持久化格式:{h: 对话历史, s: 场景图};兼容旧版纯数组(仅历史)
   private persist(): void {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.history.slice(-MAX_STORED)))
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ h: this.history.slice(-MAX_STORED), s: this.scene }),
+      )
     } catch {
       /* 容量满 / 隐私模式:静默降级为仅会话内记忆 */
     }
   }
 
-  private load(): ChatMsg[] {
+  private load(): { h: ChatMsg[]; s: Scene | null } {
+    const empty = { h: [] as ChatMsg[], s: null }
     try {
       const raw = localStorage.getItem(STORAGE_KEY)
-      if (!raw) return []
-      const arr = JSON.parse(raw)
-      if (!Array.isArray(arr)) return []
-      return arr.filter(
-        (m) => (m?.role === 'user' || m?.role === 'assistant') && typeof m?.content === 'string',
+      if (!raw) return empty
+      const data = JSON.parse(raw)
+      const arr = Array.isArray(data) ? data : Array.isArray(data?.h) ? data.h : []
+      const h = arr.filter(
+        (m: ChatMsg) => (m?.role === 'user' || m?.role === 'assistant') && typeof m?.content === 'string',
       )
+      const s = !Array.isArray(data) && data?.s && Array.isArray(data.s.elements) ? (data.s as Scene) : null
+      return { h, s }
     } catch {
-      return []
+      return empty
     }
   }
 }

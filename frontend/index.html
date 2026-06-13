@@ -12,8 +12,11 @@
         <button id="reset-btn" type="button" title="清空对话,从头开始">🆕 新对话</button>
       </header>
 
-      <!-- 多轮对话区 -->
-      <div id="chat"></div>
+      <!-- 主区:多轮对话 + 画面要素板(语义画布的可视化) -->
+      <div id="main-row">
+        <div id="chat"></div>
+        <aside id="scene"></aside>
+      </div>
 
       <!-- 版本条(检查点总览;点击或语音「回到第N张」跳转) -->
       <div id="versions" class="empty"></div>
