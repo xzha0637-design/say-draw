@@ -48,7 +48,6 @@ function getCtor(): SpeechRecognitionCtor | null {
 export class ASR {
   private recognition: SpeechRecognitionLike | null = null
   private wantListening = false
-  private muted = false
   private readonly cb: ASRCallbacks
 
   constructor(cb: ASRCallbacks = {}) {
@@ -81,21 +80,6 @@ export class ASR {
     this.recognition?.stop()
   }
 
-  /**
-   * 临时静麦(TTS 播报期间防回环):静麦时中断识别、忽略结果、不自动重启;
-   * 解除后若用户仍在聆听态则自动恢复。不改动 wantListening,故按钮状态(用户意图)不变。
-   */
-  setMuted(muted: boolean): void {
-    if (this.muted === muted) return
-    this.muted = muted
-    if (muted) {
-      this.recognition?.abort()
-    } else if (this.wantListening) {
-      const Ctor = getCtor()
-      if (Ctor) this.spawn(Ctor)
-    }
-  }
-
   private spawn(Ctor: SpeechRecognitionCtor): void {
     const rec = new Ctor()
     rec.lang = 'zh-CN'
@@ -104,7 +88,6 @@ export class ASR {
     rec.maxAlternatives = 1
 
     rec.onresult = (e) => {
-      if (this.muted) return
       let interim = ''
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const result = e.results[i]
@@ -131,8 +114,8 @@ export class ASR {
     }
 
     rec.onend = () => {
-      // 浏览器静音后会自动结束;只要仍想聆听(且未被 TTS 静麦)就重启,实现持续聆听
-      if (this.wantListening && !this.muted) this.spawn(Ctor)
+      // 浏览器静音后会自动结束;只要仍想聆听就重启,实现持续聆听
+      if (this.wantListening) this.spawn(Ctor)
     }
 
     this.recognition = rec

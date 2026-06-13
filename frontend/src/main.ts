@@ -198,8 +198,8 @@ async function generate(
   return (await resp.json()) as { ok: true; url: string } | { ok: false; reason: string }
 }
 
-// ---- TTS:朗读助手回复;朗读期间静麦,避免把自己的话听成新输入 ----
-const tts = new TTS({ onSpeakingChange: (speaking) => asr.setMuted(speaking) })
+// ---- TTS:朗读助手回复;支持语音打断(barge-in)——朗读中用户开口即打断,回声经 isEcho 过滤 ----
+const tts = new TTS()
 
 // ---- 会话控制器(带记忆 + 反问 + 生成)----
 const conversation = new Conversation(
@@ -226,8 +226,16 @@ const asr = new ASR({
     micBtn.textContent = listening ? '⏹ 停止聆听' : '🎤 开始聆听'
     idleStatus()
   },
-  onInterim: (text) => setStatus(text, 'interim'),
-  onFinal: (text) => void conversation.handle(text),
+  onInterim: (text) => {
+    if (tts.isEcho(text)) return // 麦克风听到的是 TTS 自己的声音:不上屏、更不打断
+    if (tts.speaking) tts.cancel() // 语音打断:用户开口,AI 立刻闭嘴
+    setStatus(text, 'interim')
+  },
+  onFinal: (text) => {
+    if (tts.isEcho(text)) return
+    if (tts.speaking) tts.cancel()
+    void conversation.handle(text)
+  },
   onError: (msg) => setStatus(msg, 'pending'),
 })
 
