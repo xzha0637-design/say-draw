@@ -1,7 +1,9 @@
 import './style.css'
 import { ASR } from './asr'
-import { Conversation, type Scene, type SceneChanges, type VersionView } from './chat'
+import { Conversation, type GenResult, type Scene, type SceneChanges, type Snapshot, type VersionView } from './chat'
 import { TTS } from './tts'
+import * as auth from './auth'
+import * as sessions from './sessions'
 
 const chatEl = document.getElementById('chat') as HTMLDivElement
 const sceneEl = document.getElementById('scene') as HTMLElement
@@ -12,6 +14,24 @@ const resetBtn = document.getElementById('reset-btn') as HTMLButtonElement
 const resultOverlay = document.getElementById('result-overlay') as HTMLDivElement
 const resultImg = document.getElementById('result-img') as HTMLImageElement
 const resultCaption = document.getElementById('result-caption') as HTMLDivElement
+// 登录与会话管理 UI
+const authOverlay = document.getElementById('auth-overlay') as HTMLDivElement
+const authForm = document.getElementById('auth-form') as HTMLFormElement
+const authUser = document.getElementById('auth-user') as HTMLInputElement
+const authPass = document.getElementById('auth-pass') as HTMLInputElement
+const authSubmit = document.getElementById('auth-submit') as HTMLButtonElement
+const authToggle = document.getElementById('auth-toggle') as HTMLButtonElement
+const authTitle = document.getElementById('auth-title') as HTMLDivElement
+const authErr = document.getElementById('auth-err') as HTMLDivElement
+const userTag = document.getElementById('user-tag') as HTMLSpanElement
+const logoutBtn = document.getElementById('logout-btn') as HTMLButtonElement
+const myWorksBtn = document.getElementById('myworks-btn') as HTMLButtonElement
+const drawer = document.getElementById('drawer') as HTMLDivElement
+const drawerList = document.getElementById('drawer-list') as HTMLDivElement
+const drawerClose = document.getElementById('drawer-close') as HTMLButtonElement
+
+// 当前活动会话 id;所有出图与持久化都归属它
+let activeSessionId: string | null = null
 
 function escapeHtml(s: string): string {
   const map: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }
@@ -97,10 +117,20 @@ function renderScene(scene: Scene | null, changed?: SceneChanges): void {
   })
 }
 
-// ---- 放大查看覆盖层 ----
-function openOverlay(url: string): void {
+// ---- 放大查看覆盖层(含下载)----
+function openOverlay(url: string, downloadUrl?: string): void {
   resultImg.src = url
-  resultCaption.textContent = '点击任意处关闭'
+  resultCaption.innerHTML = ''
+  const dl = document.createElement('a')
+  dl.className = 'overlay-dl'
+  dl.href = downloadUrl || url
+  dl.textContent = '⬇ 下载这张图'
+  dl.setAttribute('download', '')
+  dl.addEventListener('click', (e) => e.stopPropagation()) // 点下载不触发关闭
+  resultCaption.appendChild(dl)
+  const hint = document.createElement('div')
+  hint.textContent = '点击空白处关闭'
+  resultCaption.appendChild(hint)
   resultOverlay.classList.remove('hidden')
 }
 function closeOverlay(): void {
@@ -109,8 +139,8 @@ function closeOverlay(): void {
 }
 resultOverlay.addEventListener('click', closeOverlay)
 
-// ---- 对话流内联图片(带版本号,点击放大)----
-function addImage(url: string, label?: string): void {
+// ---- 对话流内联图片(带版本号,点击放大,带下载按钮)----
+function addImage(url: string, label?: string, downloadUrl?: string): void {
   const wrap = document.createElement('div')
   wrap.className = 'msg assistant'
   const col = document.createElement('div')
@@ -119,14 +149,22 @@ function addImage(url: string, label?: string): void {
   img.className = 'gen-img'
   img.src = url
   img.alt = '生成的图片'
-  img.addEventListener('click', () => openOverlay(url))
+  img.addEventListener('click', () => openOverlay(url, downloadUrl))
   col.appendChild(img)
+  const bar = document.createElement('div')
+  bar.className = 'img-cap'
   if (label) {
-    const cap = document.createElement('div')
-    cap.className = 'img-cap'
+    const cap = document.createElement('span')
     cap.textContent = label
-    col.appendChild(cap)
+    bar.appendChild(cap)
   }
+  const dl = document.createElement('a')
+  dl.className = 'img-dl'
+  dl.href = downloadUrl || url
+  dl.textContent = '⬇ 下载'
+  dl.setAttribute('download', '')
+  bar.appendChild(dl)
+  col.appendChild(bar)
   wrap.appendChild(col)
   chatEl.appendChild(wrap)
   chatEl.scrollTop = chatEl.scrollHeight
@@ -185,23 +223,32 @@ function addSteps(steps: string[]): (i: number, state: 'active' | 'done') => voi
   }
 }
 
-// ---- 文生图 / 改图(带 image 即编辑当前图)----
-async function generate(
-  prompt: string,
-  image?: string,
-): Promise<{ ok: true; url: string } | { ok: false; reason: string }> {
-  const resp = await fetch('/api/generate', {
+// ---- 文生图 / 改图(登录态:带 sessionId 入库、refImageId 作改图参考)----
+async function generate(prompt: string, refImageId?: string): Promise<GenResult> {
+  const resp = await auth.authedFetch('/api/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(image ? { prompt, image } : { prompt }),
+    body: JSON.stringify({ prompt, sessionId: activeSessionId, ...(refImageId ? { imageId: refImageId } : {}) }),
   })
-  return (await resp.json()) as { ok: true; url: string } | { ok: false; reason: string }
+  return (await resp.json()) as GenResult
 }
 
 // ---- TTS:朗读助手回复;支持语音打断(barge-in)——朗读中用户开口即打断,回声经 isEcho 过滤 ----
 const tts = new TTS()
 
-// ---- 会话控制器(带记忆 + 反问 + 生成)----
+// ---- 会话快照防抖持久化到服务端(每次状态变化触发,合并 600ms 内的多次写)----
+let saveTimer: number | undefined
+let pendingSnap: Snapshot | null = null
+function schedulePersist(snap: Snapshot): void {
+  pendingSnap = snap
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = window.setTimeout(() => {
+    if (activeSessionId && pendingSnap) void sessions.saveSession(activeSessionId, pendingSnap)
+    pendingSnap = null
+  }, 600)
+}
+
+// ---- 会话控制器(带记忆 + 反问 + 生成 + 服务端持久化)----
 const conversation = new Conversation(
   {
     addMessage,
@@ -217,6 +264,13 @@ const conversation = new Conversation(
     addSteps,
   },
   generate,
+  {
+    persist: schedulePersist,
+    onNewSession: () => {
+      tts.speak('好,新开一张')
+      void startNewSession()
+    },
+  },
 )
 
 // ---- 语音识别 ----
@@ -239,15 +293,137 @@ const asr = new ASR({
   onError: (msg) => setStatus(msg, 'pending'),
 })
 
-// 恢复历史对话(记忆);无历史则给一句引导语
-if (!conversation.replay()) {
-  addMessage(
-    'assistant',
-    '你好!想画什么?说说看 —— 比如「我想要一只柴犬」。我会帮你把风格、背景、用途聊清楚,你说「可以了」我就生成。',
-  )
+const GREETING =
+  '你好!想画什么?说说看 —— 比如「我想要一只柴犬」。我会帮你把风格、背景、用途聊清楚,你说「可以了」我就生成。'
+function greetIfEmpty(): void {
+  if (conversation.snapshot().history.length === 0) addMessage('assistant', GREETING)
 }
 
-resetBtn.addEventListener('click', () => void conversation.handle('新对话'))
+// ---- 会话切换 / 新建 / 列表 ----
+async function startNewSession(): Promise<void> {
+  const conv = await sessions.createSession()
+  if (!conv) return
+  activeSessionId = conv.id
+  conversation.hydrate(conv)
+  greetIfEmpty()
+  closeDrawer()
+}
+async function switchToSession(id: string): Promise<void> {
+  const conv = await sessions.loadSession(id)
+  if (!conv) return
+  activeSessionId = conv.id
+  conversation.hydrate(conv)
+  greetIfEmpty()
+  closeDrawer()
+}
+
+function openDrawer(): void {
+  drawer.classList.remove('hidden')
+  void refreshDrawer()
+}
+function closeDrawer(): void {
+  drawer.classList.add('hidden')
+}
+async function refreshDrawer(): Promise<void> {
+  drawerList.innerHTML = '正在加载…'
+  const list = await sessions.listSessions()
+  drawerList.innerHTML = ''
+  if (list.length === 0) {
+    drawerList.textContent = '还没有作品,关掉这里说「画一只猫」就开始了。'
+    return
+  }
+  for (const s of list) {
+    const row = document.createElement('div')
+    row.className = 'drawer-item' + (s.id === activeSessionId ? ' active' : '')
+    const meta = document.createElement('button')
+    meta.className = 'drawer-open'
+    meta.innerHTML =
+      `<span class="d-title">${escapeHtml(s.title || '新会话')}</span>` +
+      `<span class="d-sub">${s.versionCount} 张 · ${fmtTime(s.updatedAt)}</span>`
+    meta.addEventListener('click', () => void switchToSession(s.id))
+    const del = document.createElement('button')
+    del.className = 'drawer-del'
+    del.textContent = '🗑'
+    del.title = '删除这段会话'
+    del.addEventListener('click', async () => {
+      if (!confirm(`删除「${s.title || '新会话'}」?其图片也会一并删除。`)) return
+      await sessions.deleteSession(s.id)
+      if (s.id === activeSessionId) await startNewSession()
+      else void refreshDrawer()
+    })
+    row.appendChild(meta)
+    row.appendChild(del)
+    drawerList.appendChild(row)
+  }
+}
+function fmtTime(ts: number): string {
+  const d = new Date(ts)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+// ---- 登录态引导:登录后载入会话,未登录显示登录框 ----
+async function bootstrapAfterLogin(): Promise<void> {
+  authOverlay.classList.add('hidden')
+  userTag.textContent = '👤 ' + (auth.getUsername() || '')
+  const list = await sessions.listSessions()
+  if (list.length > 0) await switchToSession(list[0].id)
+  else await startNewSession()
+}
+function showLogin(): void {
+  activeSessionId = null
+  authOverlay.classList.remove('hidden')
+  authErr.textContent = ''
+  authUser.value = ''
+  authPass.value = ''
+}
+auth.setUnauthorizedHandler(showLogin)
+
+// ---- 登录 / 注册表单 ----
+let authMode: 'login' | 'register' = 'login'
+function syncAuthMode(): void {
+  const reg = authMode === 'register'
+  authTitle.textContent = reg ? '注册新账号' : '登录'
+  authSubmit.textContent = reg ? '注册并进入' : '登录'
+  authToggle.textContent = reg ? '已有账号?去登录' : '没有账号?去注册'
+  authErr.textContent = ''
+}
+authToggle.addEventListener('click', () => {
+  authMode = authMode === 'login' ? 'register' : 'login'
+  syncAuthMode()
+})
+authForm.addEventListener('submit', async (e) => {
+  e.preventDefault()
+  const u = authUser.value.trim()
+  const p = authPass.value
+  if (!u || !p) {
+    authErr.textContent = '请输入用户名和密码'
+    return
+  }
+  authSubmit.disabled = true
+  const r = authMode === 'register' ? await auth.register(u, p) : await auth.login(u, p)
+  authSubmit.disabled = false
+  if (!r.ok) {
+    authErr.textContent = r.reason
+    return
+  }
+  await bootstrapAfterLogin()
+})
+
+logoutBtn.addEventListener('click', () => {
+  auth.clearSession()
+  clearChat()
+  conversation.hydrate({ history: [], scene: null, versions: [], currentIndex: -1 })
+  showLogin()
+})
+myWorksBtn.addEventListener('click', openDrawer)
+drawerClose.addEventListener('click', closeDrawer)
+resetBtn.addEventListener('click', () => void startNewSession())
+
+// 启动:有令牌直接进,否则显示登录框
+syncAuthMode()
+if (auth.getToken()) void bootstrapAfterLogin()
+else showLogin()
 
 if (!ASR.supported) {
   micBtn.disabled = true
