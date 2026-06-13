@@ -1,5 +1,8 @@
 import 'dotenv/config'
 import express from 'express'
+import zlib from 'node:zlib'
+import { randomUUID } from 'node:crypto'
+import { WebSocketServer, WebSocket } from 'ws'
 import * as store from './store.js'
 
 const PORT = process.env.PORT || 8787
@@ -10,6 +13,12 @@ const ARK_MODEL = process.env.ARK_MODEL
 const ARK_THINKING = process.env.ARK_THINKING
 // Seedream 文生图模型;需在方舟「开通管理」开通对应模型,模型 ID 填这里
 const ARK_IMAGE_MODEL = process.env.ARK_IMAGE_MODEL
+
+// 七牛云流式语音识别(WebSocket;OpenAI 兼容平台,Bearer 鉴权)。
+// 配置 QINIU_AI_KEY 后前端走云端识别(跨浏览器、内地可用);未配置则回退浏览器 Web Speech,保主分支可运行。
+const QINIU_AI_KEY = process.env.QINIU_AI_KEY
+const QINIU_ASR_WS = process.env.QINIU_ASR_WS || 'wss://api.qnaigc.com/v1/voice/asr'
+const QINIU_ASR_MODEL = process.env.QINIU_ASR_MODEL || 'asr'
 
 // 对话式造图的系统提示:多轮聊清画面 → 满意后触发生成。
 // 语义画布:模型每轮同时维护并完整返回结构化场景图 scene,前端据此渲染「画面要素板」。
@@ -37,10 +46,11 @@ multi 的使用规则(复杂指令拆解):
 - 够清楚且用户让你开始("可以了""生成吧""开始画"等)→ 输出 generate。
 
 已经有一张图时(系统会提示"当前已有图"):
+- ⚠️【避免无谓重绘 —— 最重要的判断】每次 edit/generate 都要花约 20 秒并产生费用,所以【只有】用户给出明确、具体、可执行的画面改动时才用 edit。凡是语气词、口头确认(嗯/好/可以/行/不错/就这样)、夸奖、笑声、与画面无关的闲聊或提问、没听清、意图不明确的话——【一律用 chat,绝不重绘】,用一句很短的话回应或反问即可。宁可不画,也不要凭空重画一张几乎一样的图。
 - 用户要改它(改颜色/换背景/增减元素/调整大小或位置/换风格等)→ 用 edit,并把 scene 同步改到位。系统会自动把当前图作为参考传给生图模型,你不用管图怎么传。
 - edit 的 prompt 要写清"改动后的画面",用"保留X不变,把Y改成Z"或"在…增加…,其余保持不变"这种描述,确保只动该动的、其余维持一致。
 - 只有用户明确想要"一张全新、与当前无关的图"时才用 generate。
-- 用户只是夸赞/闲聊/问问题(不是要改图)→ 仍用 chat。信息太模糊不足以改 → 先 chat 问清,反问尽量给选项(如"是猫的左边还是画面的左边?")。
+- 信息太模糊不足以改 → 先 chat 问清,反问尽量给选项(如"是猫的左边还是画面的左边?")。
 
 prompt 通用要求:依据【更新后的 scene】给出完整中文画面描述,主体+风格+背景+关键细节+色调,尽量具体可成画,不要对话语气词。
 reply:会被朗读,要短、自然口语。确认类不超过 14 字(例:"好,这就画~""没问题,猫改橙色~");反问类必须把具体问题问出口、可带选项,不超过 30 字(例:"想要什么风格?卡通还是写实?")。
@@ -134,11 +144,118 @@ async function callSeedream(prompt, image) {
   return url
 }
 
+// ───────── 七牛云流式 ASR:二进制帧协议(版本1 / JSON 序列化 / gzip;消息类型 1=配置 2=音频)─────────
+// 协议见 https://developer.qiniu.com/aitokenapi/12981/asr-tts-ocr-api 的 Node/Python 示例。
+// 帧格式:[4 字节头][4 字节序列号][4 字节 payload 长度][gzip(payload)]。
+function asrHeader(messageType) {
+  const h = Buffer.alloc(4)
+  h[0] = (1 << 4) | 1 // 协议版本 1 | header size 1(=4 字节)
+  h[1] = (messageType << 4) | 1 // 消息类型 | flags=1(带序列号)
+  h[2] = (1 << 4) | 1 // 序列化=1(JSON) | 压缩=1(gzip)
+  h[3] = 0
+  return h
+}
+function asrFrame(messageType, seq, payload) {
+  const gz = zlib.gzipSync(payload)
+  const seqBuf = Buffer.alloc(4)
+  seqBuf.writeInt32BE(seq)
+  const lenBuf = Buffer.alloc(4)
+  lenBuf.writeInt32BE(gz.length)
+  return Buffer.concat([asrHeader(messageType), seqBuf, lenBuf, gz])
+}
+/** 解析服务端返回帧,取累计识别文本(失败返回 '')。 */
+function parseAsrText(data) {
+  try {
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
+    const headerSize = buf[0] & 0x0f
+    const messageType = buf[1] >> 4
+    const flags = buf[1] & 0x0f
+    const serialization = buf[2] >> 4
+    const compression = buf[2] & 0x0f
+    let payload = buf.slice(headerSize * 4)
+    if (flags & 0x01) payload = payload.slice(4) // 跳过序列号
+    if (messageType === 0b1001 && payload.length >= 4) {
+      const size = payload.readInt32BE(0) // 完整服务端响应:前 4 字节是长度
+      payload = payload.slice(4, 4 + size)
+    }
+    if (compression === 0b0001) payload = zlib.gunzipSync(payload)
+    const obj = serialization === 0b0001 ? JSON.parse(payload.toString('utf8')) : payload.toString('utf8')
+    return obj?.result?.text || obj?.payload_msg?.result?.text || ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * WebSocket 代理:浏览器 PCM 帧 → 七牛云流式 ASR → 累计文本回浏览器。
+ * 代理而非浏览器直连的原因:把 API Key 与二进制协议都留在服务端,浏览器只推裸 PCM、收 {text}。
+ */
+function attachAsrProxy(server) {
+  const wss = new WebSocketServer({ server, path: '/api/asr/stream' })
+  wss.on('connection', (client) => {
+    if (!QINIU_AI_KEY) {
+      client.close(1011, 'ASR 未配置')
+      return
+    }
+    let seq = 1
+    let ready = false
+    const queue = [] // 上游就绪前缓存浏览器音频帧
+    const upstream = new WebSocket(QINIU_ASR_WS, { headers: { Authorization: `Bearer ${QINIU_AI_KEY}` } })
+
+    upstream.on('open', () => {
+      const config = {
+        user: { uid: randomUUID() },
+        audio: { format: 'pcm', sample_rate: 16000, bits: 16, channel: 1, codec: 'raw' },
+        request: { model_name: QINIU_ASR_MODEL, enable_punc: true },
+      }
+      upstream.send(asrFrame(1, seq, Buffer.from(JSON.stringify(config), 'utf8')))
+      ready = true
+      for (const chunk of queue) upstream.send(asrFrame(2, ++seq, chunk))
+      queue.length = 0
+      if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify({ reset: true }))
+    })
+    upstream.on('message', (data) => {
+      const text = parseAsrText(data)
+      if (text && client.readyState === WebSocket.OPEN) client.send(JSON.stringify({ text }))
+    })
+    upstream.on('error', (e) => {
+      console.error('[asr] 上游错误:', e?.message || e)
+      if (client.readyState === WebSocket.OPEN) client.close(1011, '上游识别错误')
+    })
+    upstream.on('close', () => {
+      if (client.readyState === WebSocket.OPEN) client.close()
+    })
+
+    client.on('message', (data, isBinary) => {
+      if (!isBinary) return // 只处理二进制 PCM 帧
+      const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data)
+      if (!ready) {
+        queue.push(chunk)
+        return
+      }
+      if (upstream.readyState === WebSocket.OPEN) upstream.send(asrFrame(2, ++seq, chunk))
+    })
+    const closeUpstream = () => {
+      try {
+        upstream.close()
+      } catch {
+        /* noop */
+      }
+    }
+    client.on('close', closeUpstream)
+    client.on('error', closeUpstream)
+  })
+}
+
 const app = express()
 app.use(express.json({ limit: '512kb' })) // 会话快照含多版本场景图,放宽默认 100kb
 
 // 健康检查
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
+
+// 云端 ASR 是否可用:前端据此决定走云端流式识别还是回退浏览器 Web Speech
+app.get('/api/asr/status', (_req, res) => res.json({ enabled: !!QINIU_AI_KEY }))
+// 流式识别本体走 WebSocket /api/asr/stream(见文件末尾 attachAsrProxy)
 
 // ───────────────── 登录与会话隔离(user_id × session_id) ─────────────────
 
@@ -351,9 +468,13 @@ app.get('/api/images/:id', (req, res) => {
   res.end(img.bytes)
 })
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`语音造图后端已启动:http://localhost:${PORT}`)
   if (!ARK_KEY || !ARK_MODEL) {
     console.warn('⚠️  未检测到 ARK_API_KEY / ARK_MODEL,/api/chat 将返回配置错误。请复制 .env.example 为 .env 并填写。')
   }
+  if (!QINIU_AI_KEY) {
+    console.warn('ℹ️  未检测到 QINIU_AI_KEY,云端流式语音识别关闭;前端将回退浏览器 Web Speech。')
+  }
 })
+attachAsrProxy(server) // 挂载 /api/asr/stream WebSocket 代理

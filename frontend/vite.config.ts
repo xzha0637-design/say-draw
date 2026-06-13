@@ -6,8 +6,9 @@ export default defineConfig({
     port: 5173,
     open: true,
     // 开发期把 /api 代理到后端(豆包慢路),浏览器同源调用、免 CORS
+    // ws:true 让 /api/asr/stream 的 WebSocket(云端流式语音识别)也能经代理到达后端
     proxy: {
-      '/api': 'http://localhost:8787',
+      '/api': { target: 'http://localhost:8787', ws: true },
     },
   },
 })
