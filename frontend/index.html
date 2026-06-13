@@ -8,8 +8,13 @@
   <body>
     <div id="app">
       <header id="topbar">
-        <span>🎙️ 语音造图 · 和 AI 聊清楚 → 一键生成</span>
-        <button id="reset-btn" type="button" title="清空对话,从头开始">🆕 新对话</button>
+        <span class="brand">🎙️ 语音造图</span>
+        <div class="top-actions">
+          <span id="user-tag" class="user-tag"></span>
+          <button id="myworks-btn" type="button" title="我的作品(历史会话)">🗂️ 我的画</button>
+          <button id="reset-btn" type="button" title="新建一段会话">🆕 新会话</button>
+          <button id="logout-btn" type="button" title="退出登录">退出</button>
+        </div>
       </header>
 
       <!-- 主区:多轮对话 + 画面要素板(语义画布的可视化) -->
@@ -32,6 +37,30 @@
     <div id="result-overlay" class="hidden">
       <img id="result-img" alt="生成的图片" />
       <div id="result-caption"></div>
+    </div>
+
+    <!-- 我的画(历史会话抽屉) -->
+    <div id="drawer" class="hidden">
+      <div class="drawer-panel">
+        <div class="drawer-head">
+          <span>🗂️ 我的画</span>
+          <button id="drawer-close" type="button">✕</button>
+        </div>
+        <div id="drawer-list"></div>
+      </div>
+    </div>
+
+    <!-- 登录 / 注册覆盖层 -->
+    <div id="auth-overlay">
+      <form id="auth-form" class="auth-card">
+        <div id="auth-title" class="auth-title">登录</div>
+        <div class="auth-sub">语音造图 · 你的作品按账号隔离、自动保存、随时下载</div>
+        <input id="auth-user" type="text" autocomplete="username" placeholder="用户名(2~20 位)" />
+        <input id="auth-pass" type="password" autocomplete="current-password" placeholder="密码(至少 4 位)" />
+        <div id="auth-err" class="auth-err"></div>
+        <button id="auth-submit" type="submit">登录</button>
+        <button id="auth-toggle" type="button" class="auth-toggle">没有账号?去注册</button>
+      </form>
     </div>
 
     <script type="module" src="/src/main.ts"></script>
