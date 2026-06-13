@@ -30,6 +30,10 @@ export interface ASRCallbacks {
   onFinal?: (text: string) => void
   onListeningChange?: (listening: boolean) => void
   onError?: (message: string) => void
+  /** 云端识别上传/识别期间为 true(Web Speech 版不触发);供界面显示「识别中…」。 */
+  onRecognizing?: (active: boolean) => void
+  /** 云端流式版:朗读(静音)期间检测到用户开口 → 用于打断 TTS(Web Speech 版不触发)。 */
+  onBargeIn?: () => void
 }
 
 function getCtor(): SpeechRecognitionCtor | null {
@@ -41,7 +45,7 @@ function getCtor(): SpeechRecognitionCtor | null {
 }
 
 /** 把 getUserMedia 的具体异常翻译成可操作的中文提示。 */
-function micErrorMessage(e: unknown): string {
+export function micErrorMessage(e: unknown): string {
   const name = e instanceof DOMException ? e.name : ''
   switch (name) {
     case 'NotAllowedError':

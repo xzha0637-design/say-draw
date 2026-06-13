@@ -47,7 +47,7 @@
 ## 技术栈
 
 - **前端**:Vite + TypeScript(纯前端对话 UI,**无第三方运行时依赖**)
-- **语音**:Web Speech API —— 识别 `webkitSpeechRecognition`(zh-CN) + 合成 `SpeechSynthesis`
+- **语音**:识别支持**双后端**——配置 `QINIU_AI_KEY` 时走**七牛云 AI 流式语音识别**(云端,跨浏览器 / 内地可用;前端 Web Audio 采集 → 16k 单声道 PCM **流式推** WebSocket `/api/asr/stream`,后端按七牛二进制协议代理、key 不进浏览器);未配置则**自动回退**浏览器 `webkitSpeechRecognition`(zh-CN)。合成统一用 `SpeechSynthesis`
 - **后端**:Node + Express,转发**火山方舟 Ark**(OpenAI 兼容,密钥不进浏览器,原生 `fetch` 无需 SDK);**SQLite(better-sqlite3)**持久化用户 / 会话 / 图片,登录用令牌鉴权、密码 `node:crypto` scrypt 加盐哈希
 - **模型**:对话 = 豆包(`ARK_MODEL`,如 `doubao-seed-2.0-mini`);文生图 = Seedream(`ARK_IMAGE_MODEL`)
 - **数据隔离**:`user_id`(账号)× `session_id`(一段对话)双键隔离;图片字节入库,经「能力 URL」`/api/images/:id?k=…` 长期可看可下载
@@ -60,8 +60,10 @@
 
 - **Node.js ≥ 18**(含 npm):https://nodejs.org ,或 macOS `brew install node`
 - **Git**
-- **浏览器:Chrome 或 Edge**(语音识别依赖 Web Speech API;Safari / Firefox 不保证)
-  - ⚠️ **Chrome 的语音识别走 Google 云端服务**,网络无法访问 Google 时(内地直连常见)识别会报错——此时请**改用 Microsoft Edge**(识别走微软服务,直连可用),或确保代理可达。页面状态栏会给出具体错误与指引。
+- **浏览器**:
+  - **配置了 `QINIU_AI_KEY`(云端 ASR)** → 任意带麦克风的现代浏览器均可(识别在自家后端,不依赖 Google,内地直连可用)。
+  - **未配置(回退浏览器 Web Speech)** → 需 **Chrome 或 Edge**;Safari / Firefox 不保证。
+    - ⚠️ **Chrome 的语音识别走 Google 云端服务**,网络无法访问 Google 时(内地直连常见)识别会报错——此时请**改用 Microsoft Edge**(走微软服务,直连可用)、确保代理可达,或**配置七牛云 ASR** 一劳永逸。页面状态栏会给出具体错误与指引。
 - 一个可用的**麦克风**
 
 ### 2. 获取代码
@@ -120,6 +122,11 @@ npm run dev                # http://localhost:5173,自动打开(请用 Chrome / 
 curl http://localhost:8787/api/health
 # 预期:{"ok":true}
 
+# 云端语音识别是否启用(前端据此决定走云端流式 ASR 还是回退浏览器识别):
+curl http://localhost:8787/api/asr/status
+# 预期:{"enabled":true}(已配置 QINIU_AI_KEY)或 {"enabled":false}(回退浏览器 Web Speech)
+# 识别本体走 WebSocket ws://localhost:8787/api/asr/stream(浏览器推 16k 单声道 PCM 帧,收 {"text":"…"}累计文本)
+
 # 多轮对话(messages 为对话历史):
 curl -X POST http://localhost:8787/api/chat \
   -H 'Content-Type: application/json' \
@@ -165,8 +172,8 @@ npm run preview    # 本地预览构建产物
 
 ## 依赖说明
 
-- **第三方**:前端 vite、typescript(均为构建期依赖,**运行时无第三方库**);后端 express、dotenv、**better-sqlite3**(同步 SQLite 驱动,用于用户 / 会话 / 图片持久化;密码哈希用 Node 内置 `node:crypto`)。详见各模块 `package.json`。豆包对话与 Seedream 文生图经**火山方舟 OpenAI 兼容接口**调用,后端用原生 `fetch`,无需额外 SDK。
-- **原创部分**:语义画布(场景图协议、画面要素板、版本场景快照)、登录与隔离体系(`user_id × session_id` 数据隔离、令牌鉴权、图片字节入库与「能力 URL」下载)、对话造图的会话控制器(记忆 / 持久化 / 看图态切换)、后端对话系统提示词与 `{action, reply, prompt, scene}` 归一化、由模型判断生成时机与反问策略、前端语音对话 UI、ASR↔TTS 语音打断(barge-in)与回声过滤联动、Seedream 接入与展示。
+- **第三方**:前端 vite、typescript(均为构建期依赖,**运行时无第三方库**);后端 express、dotenv、**better-sqlite3**(同步 SQLite 驱动,用户 / 会话 / 图片持久化)、**ws**(WebSocket,云端流式 ASR 代理);密码哈希用 Node 内置 `node:crypto`、gzip 用内置 `node:zlib`。详见各模块 `package.json`。豆包对话与 Seedream 文生图经**火山方舟 OpenAI 兼容接口**(原生 `fetch`);云端语音识别经**七牛云 AI 流式接口**(WebSocket,后端 `ws` 代理),均无需厂商 SDK。
+- **原创部分**:语义画布(场景图协议、画面要素板、版本场景快照)、登录与隔离体系(`user_id × session_id` 数据隔离、令牌鉴权、图片字节入库与「能力 URL」下载)、对话造图的会话控制器(记忆 / 持久化 / 看图态切换)、后端对话系统提示词与 `{action, reply, prompt, scene}` 归一化、由模型判断生成时机与反问策略、前端语音对话 UI、ASR↔TTS 语音打断(barge-in)与回声过滤联动、**双识别后端选择与降级 + 前端 Web Audio 采集 / 能量 barge-in / 16k PCM 流式上送 + 后端七牛二进制帧协议代理的云端流式 ASR(CloudASR + /api/asr/stream)**、Seedream 接入与展示。
 
 ## 目录结构
 

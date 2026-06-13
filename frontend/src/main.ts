@@ -1,5 +1,6 @@
 import './style.css'
-import { ASR } from './asr'
+import { ASR, type ASRCallbacks } from './asr'
+import { CloudASR } from './cloud-asr'
 import { Conversation, type GenResult, type Scene, type SceneChanges, type Snapshot, type VersionView } from './chat'
 import { TTS } from './tts'
 import * as auth from './auth'
@@ -65,7 +66,7 @@ function idleStatus(): void {
   const tip = conversation.hasVersions
     ? '试试:「把猫改成白色」「回到第 1 张」「收藏」'
     : '例:「画一只戴围巾的橙色小猫」'
-  setStatus(asr.listening ? `🎧 在听… ${tip}` : '点击下方按钮并允许麦克风,说说你想画什么…', 'idle')
+  setStatus(asr?.listening ? `🎧 在听… ${tip}` : '点击下方按钮并允许麦克风,说说你想画什么…', 'idle')
 }
 
 // ---- 画面要素板(语义画布的可视化:风格/背景/用途 + 元素卡片,变更闪烁)----
@@ -234,7 +235,12 @@ async function generate(prompt: string, refImageId?: string): Promise<GenResult>
 }
 
 // ---- TTS:朗读助手回复;支持语音打断(barge-in)——朗读中用户开口即打断,回声经 isEcho 过滤 ----
-const tts = new TTS()
+const tts = new TTS({
+  // 云端流式 ASR:朗读期间静音上送防回环(Web Speech 版无 setMuted,instanceof 守卫)
+  onSpeakingChange: (speaking) => {
+    if (asr instanceof CloudASR) asr.setMuted(speaking)
+  },
+})
 
 // ---- 会话快照防抖持久化到服务端(每次状态变化触发,合并 600ms 内的多次写)----
 let saveTimer: number | undefined
@@ -273,8 +279,8 @@ const conversation = new Conversation(
   },
 )
 
-// ---- 语音识别 ----
-const asr = new ASR({
+// ---- 语音识别(云端七牛云 ASR 优先,未配置则回退浏览器 Web Speech;两者同接口)----
+const asrCallbacks: ASRCallbacks = {
   onListeningChange: (listening) => {
     micBtn.classList.toggle('listening', listening)
     micBtn.textContent = listening ? '⏹ 停止聆听' : '🎤 开始聆听'
@@ -290,8 +296,17 @@ const asr = new ASR({
     if (tts.speaking) tts.cancel()
     void conversation.handle(text)
   },
+  onRecognizing: (active) => {
+    // 云端流式识别:识别中提示「识别中…」(Web Speech 版不触发此回调)
+    if (active) setStatus('🎤 识别中…', 'pending')
+    else idleStatus()
+  },
+  onBargeIn: () => {
+    if (tts.speaking) tts.cancel() // 朗读中用户开口:立刻打断,随后解除静音恢复上送
+  },
   onError: (msg) => setStatus(msg, 'pending'),
-})
+}
+let asr: ASR | CloudASR
 
 const GREETING =
   '你好!想画什么?说说看 —— 比如「我想要一只柴犬」。我会帮你把风格、背景、用途聊清楚,你说「可以了」我就生成。'
@@ -425,13 +440,33 @@ syncAuthMode()
 if (auth.getToken()) void bootstrapAfterLogin()
 else showLogin()
 
-if (!ASR.supported) {
-  micBtn.disabled = true
-  micBtn.textContent = '浏览器不支持语音'
-  setStatus('当前浏览器不支持 Web Speech API,请用 Chrome 或 Edge 打开。', 'pending')
-} else {
+// 选择识别后端:七牛云云端 ASR(已配置)优先 → 否则浏览器 Web Speech → 都不行则禁用麦克风
+async function initASR(): Promise<void> {
+  // 对比/调试开关:?asr=web 强制浏览器 Web Speech;?asr=cloud 强制七牛云流式;缺省自动(云端已配置则用云端)
+  const force = new URLSearchParams(location.search).get('asr')
+  let useCloud = false
+  if (force === 'web') useCloud = false
+  else if (force === 'cloud') useCloud = CloudASR.supported
+  else if (CloudASR.supported) {
+    try {
+      const r = await fetch('/api/asr/status')
+      useCloud = (await r.json())?.enabled === true
+    } catch {
+      useCloud = false
+    }
+  }
+  asr = useCloud ? new CloudASR(asrCallbacks) : new ASR(asrCallbacks)
+  micBtn.title = useCloud ? '识别引擎:七牛云流式 ASR' : '识别引擎:浏览器 Web Speech'
+  console.log(`[ASR] 识别引擎 = ${useCloud ? 'cloud 七牛云流式' : 'web 浏览器 Web Speech'}${force ? ' (?asr= 强制)' : ' (自动)'}`)
+  if (!useCloud && !ASR.supported) {
+    micBtn.disabled = true
+    micBtn.textContent = '浏览器不支持语音'
+    setStatus('未配置云端识别,且当前浏览器不支持 Web Speech;请配置七牛云 ASR,或用 Chrome / Edge 打开。', 'pending')
+    return
+  }
   micBtn.addEventListener('click', () => {
     if (asr.listening) asr.stop()
     else void asr.start()
   })
 }
+void initASR()
