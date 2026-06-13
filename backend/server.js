@@ -5,38 +5,41 @@ const PORT = process.env.PORT || 8787
 const ARK_BASE = process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3'
 const ARK_KEY = process.env.ARK_API_KEY
 const ARK_MODEL = process.env.ARK_MODEL
-// 推理模型(如 doubao-seed 系列)设为 "disabled" 可关闭"思考",解析提速 2~3 倍;非推理模型留空
+// 推理模型(如 doubao-seed 系列)设为 "disabled" 可关闭"思考",对话提速;非推理模型留空
 const ARK_THINKING = process.env.ARK_THINKING
+// Seedream 文生图模型;需在方舟「开通管理」开通对应模型,模型 ID 填这里
+const ARK_IMAGE_MODEL = process.env.ARK_IMAGE_MODEL
 
-// 与前端 commands.ts 对齐的取值域(后端做最终校验,不信任模型输出)
-const SHAPES = ['circle', 'rect', 'triangle', 'line']
-const SIZES = ['small', 'medium', 'large']
-const POSITIONS = [
-  'top-left', 'top', 'top-right',
-  'left', 'center', 'right',
-  'bottom-left', 'bottom', 'bottom-right',
-]
-const DEFAULT_COLOR = '#3498db'
+// 对话式造图的系统提示:多轮聊清画面 → 满意后触发生成
+const CHAT_SYSTEM_PROMPT = `你是「语音造图」的 AI 助手。用户只能用语音和你交流,你们先把"想要的画面"聊清楚并生成,之后还能用语音不断修改这张图,直到满意。
 
-const SYSTEM_PROMPT = `你是语音绘图工具的指令解析器。把用户的中文绘图指令解析成一个 JSON 对象,只输出 JSON,不要解释。
+每轮只输出一个 JSON 对象,三选一:
+- 继续聊: {"action":"chat","reply":"…"}
+- 生成新图: {"action":"generate","reply":"…","prompt":"…"}
+- 修改当前图: {"action":"edit","reply":"…","prompt":"…"}
 
-字段与取值:
-- action: "draw"(绘制) | "clear"(清空画布) | "unknown"(无法理解或不支持)
-- 当 action="draw" 时还需:
-  - shape: "circle"(圆) | "rect"(方块/矩形/正方形) | "triangle"(三角形) | "line"(线)
-  - color: CSS 颜色字符串(十六进制如 "#87CEEB",或英文名如 "skyblue");无法判断填 ""
-  - size: "small"(小/迷你) | "medium"(中/默认) | "large"(大/巨大)
-  - position: "top-left" "top" "top-right" "left" "center" "right" "bottom-left" "bottom" "bottom-right"(九宫格;无法判断填 "center")
-- 当 action="unknown" 时:加 "reason" 字段简短说明(如 "不支持的图形:五角星")。
+还没有图时:
+- 帮用户把画面说清楚,逐步确认四件事:① 画什么(主体/内容)② 风格(写实照片/卡通/油画/水彩/像素/线描…)③ 背景或场景 ④ 用途(头像/海报/壁纸/插画/表情…)。
+- 若关键信息缺失(尤其风格、背景、用途),用 chat 友好、口语地一次问清缺的一两项,别一口气问太多。
+- 够清楚且用户让你开始("可以了""生成吧""开始画"等)→ 输出 generate。
 
-规则:
-- 形状只能是上述四种;用户要的形状不在其中时,用 action="unknown" 并说明。
-- 颜色尽量给准确的十六进制或英文名(如 "天蓝色"→"#87CEEB","土黄色"→"#cca300")。
-- 模糊量词("大一点""小小的""特别大")映射到 small/medium/large。
-- 严格只输出一个 JSON 对象,不要 markdown 代码块。`
+已经有一张图时(系统会提示"当前已有图"):
+- 用户要改它(改颜色/换背景/增减元素/调整大小或位置/换风格等)→ 用 edit。系统会自动把当前图作为参考传给生图模型,你不用管图怎么传。
+- edit 的 prompt 要写清"改动后的画面",用"保留X不变,把Y改成Z"或"在…增加…,其余保持不变"这种描述,确保只动该动的、其余维持一致。
+- 只有用户明确想要"一张全新、与当前无关的图"时才用 generate。
+- 用户只是夸赞/闲聊/问问题(不是要改图)→ 仍用 chat。信息太模糊不足以改 → 先 chat 问清。
 
-/** 调用火山方舟(OpenAI 兼容)聊天补全,强制 JSON 输出。 */
-async function callDoubao(text) {
+prompt 通用要求:综合多轮对话给出【完整中文描述】,主体+风格+背景+关键细节+色调,尽量具体可成画,不要对话语气词。
+reply:会被朗读,要短、自然、像真人(生成例:"好嘞这就给你生成~";改图例:"没问题,把猫改成橙色~")。
+
+严格只输出一个 JSON,不要解释、不要 markdown、不要多余文字。`
+
+/** 对话式造图:把多轮消息发给豆包,强制 JSON 输出 {action, reply, prompt?}。
+ *  hasImage=true 时提示模型"当前已有图",引导它对修改请求用 action="edit"。 */
+async function callDoubaoChat(messages, hasImage) {
+  const system = hasImage
+    ? `${CHAT_SYSTEM_PROMPT}\n\n【当前状态:画面上已经有一张生成好的图。用户接下来若要修改它,请用 action="edit"(系统会自动把当前图作为参考);只有明确要全新无关的图才用 generate。】`
+    : CHAT_SYSTEM_PROMPT
   const resp = await fetch(`${ARK_BASE}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -45,12 +48,10 @@ async function callDoubao(text) {
     },
     body: JSON.stringify({
       model: ARK_MODEL,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: text },
-      ],
+      messages: [{ role: 'system', content: system }, ...messages],
       response_format: { type: 'json_object' },
-      temperature: 0,
+      temperature: 0.6, // 对话比解析更需要自然,略升温
+      max_tokens: 1200,
       ...(ARK_THINKING ? { thinking: { type: ARK_THINKING } } : {}),
     }),
   })
@@ -63,28 +64,35 @@ async function callDoubao(text) {
   return JSON.parse(content)
 }
 
-/** 把模型输出归一化为前端可执行的指令(防御式校验,带默认值)。 */
-function normalize(raw) {
-  if (raw?.action === 'clear') {
-    return { ok: true, command: { action: 'clear' } }
+/**
+ * 调用火山方舟 Seedream 文生图,返回图片 URL。
+ * 传 image(当前图 URL)即进入「编辑模式」:以该图为参考,只改 prompt 所述、保留其余
+ * ——Seedream 生成/编辑同一接口,差别只在多一个 image 参数。
+ */
+async function callSeedream(prompt, image) {
+  const body = {
+    model: ARK_IMAGE_MODEL,
+    prompt,
+    size: '2048x2048', // 需 ≥ 3,686,400 像素
+    response_format: 'url',
+    watermark: false,
   }
-  if (raw?.action === 'draw') {
-    if (!SHAPES.includes(raw.shape)) {
-      return { ok: false, reason: '暂不支持这种图形(仅圆 / 方块 / 三角 / 线)' }
-    }
-    return {
-      ok: true,
-      command: {
-        action: 'draw',
-        shape: raw.shape,
-        color: typeof raw.color === 'string' && raw.color.trim() ? raw.color.trim() : DEFAULT_COLOR,
-        size: SIZES.includes(raw.size) ? raw.size : 'medium',
-        position: POSITIONS.includes(raw.position) ? raw.position : 'center',
-      },
-    }
+  if (image) body.image = image
+  const resp = await fetch(`${ARK_BASE}/images/generations`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${ARK_KEY}`,
+    },
+    body: JSON.stringify(body),
+  })
+  const data = await resp.json()
+  if (!resp.ok) {
+    throw new Error(data?.error?.message || `Ark ${resp.status}`)
   }
-  const reason = typeof raw?.reason === 'string' && raw.reason ? raw.reason : '没理解这条指令'
-  return { ok: false, reason }
+  const url = data?.data?.[0]?.url
+  if (!url) throw new Error('生图返回为空')
+  return url
 }
 
 const app = express()
@@ -93,26 +101,61 @@ app.use(express.json())
 // 健康检查
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
 
-// 语音指令 → 结构化绘图指令(豆包慢路)
-app.post('/api/parse', async (req, res) => {
-  const text = (req.body?.text ?? '').toString().trim()
-  if (!text) {
-    return res.status(400).json({ ok: false, reason: '缺少 text' })
+// 多轮对话造图:语音文本会话 → 豆包(继续聊 or 触发生成)
+app.post('/api/chat', async (req, res) => {
+  const raw = Array.isArray(req.body?.messages) ? req.body.messages : []
+  const messages = raw
+    .filter(
+      (m) =>
+        (m?.role === 'user' || m?.role === 'assistant') &&
+        typeof m?.content === 'string' &&
+        m.content.trim(),
+    )
+    .map((m) => ({ role: m.role, content: m.content.trim() }))
+    .slice(-20) // 只带最近若干轮,控制延迟与成本
+  if (messages.length === 0) {
+    return res.status(400).json({ ok: false, reason: '缺少对话内容' })
   }
   if (!ARK_KEY || !ARK_MODEL) {
     return res.status(500).json({ ok: false, reason: '后端未配置 ARK_API_KEY / ARK_MODEL(见 backend/.env.example)' })
   }
+  const hasImage = req.body?.hasImage === true
   try {
-    res.json(normalize(await callDoubao(text)))
+    const out = await callDoubaoChat(messages, hasImage)
+    const reply = typeof out?.reply === 'string' && out.reply.trim() ? out.reply.trim() : '嗯,你再多说说想要的画面?'
+    if (out?.action === 'generate' || out?.action === 'edit') {
+      const prompt = typeof out?.prompt === 'string' ? out.prompt.trim() : ''
+      if (prompt) return res.json({ ok: true, action: out.action, reply, prompt })
+    }
+    res.json({ ok: true, action: 'chat', reply })
   } catch (e) {
-    console.error('[parse] 豆包调用失败:', e?.message || e)
-    res.status(502).json({ ok: false, reason: '豆包解析失败,请重试' })
+    console.error('[chat] 豆包调用失败:', e?.message || e)
+    res.status(502).json({ ok: false, reason: '对话失败,请重试' })
+  }
+})
+
+// 画面描述 → 图片(Seedream);prompt 由对话产出。带 image 则为「编辑当前图」,否则全新生成
+app.post('/api/generate', async (req, res) => {
+  const prompt = (req.body?.prompt ?? '').toString().trim()
+  const image = typeof req.body?.image === 'string' && req.body.image.trim() ? req.body.image.trim() : null
+  if (!prompt) {
+    return res.status(400).json({ ok: false, reason: '缺少 prompt' })
+  }
+  if (!ARK_KEY || !ARK_IMAGE_MODEL) {
+    return res.status(500).json({ ok: false, reason: '后端未配置 ARK_API_KEY / ARK_IMAGE_MODEL(见 backend/.env.example)' })
+  }
+  try {
+    const url = await callSeedream(prompt, image)
+    res.json({ ok: true, url })
+  } catch (e) {
+    console.error('[generate] Seedream 调用失败:', e?.message || e)
+    res.status(502).json({ ok: false, reason: `生图失败:${e?.message || '请重试'}` })
   }
 })
 
 app.listen(PORT, () => {
-  console.log(`say-draw 后端已启动:http://localhost:${PORT}`)
+  console.log(`语音造图后端已启动:http://localhost:${PORT}`)
   if (!ARK_KEY || !ARK_MODEL) {
-    console.warn('⚠️  未检测到 ARK_API_KEY / ARK_MODEL,/api/parse 将返回配置错误。请复制 .env.example 为 .env 并填写。')
+    console.warn('⚠️  未检测到 ARK_API_KEY / ARK_MODEL,/api/chat 将返回配置错误。请复制 .env.example 为 .env 并填写。')
   }
 })

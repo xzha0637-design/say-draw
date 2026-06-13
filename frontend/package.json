@@ -3,14 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "say-draw 前端:画布 + 语音 + 执行引擎",
+  "description": "语音造图前端:语音对话 + 文生图展示(纯前端,无第三方运行时依赖)",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview"
-  },
-  "dependencies": {
-    "konva": "^9.3.20"
   },
   "devDependencies": {
     "typescript": "^5.6.3",
